@@ -9,13 +9,13 @@ const DBus = @import("DBus.zig");
 // Use a D-Bus method call to open a new tab on GTK.
 // See: https://wiki.gnome.org/Projects/GLib/GApplication/DBusAPI
 //
-// `ghostty +new-tab` is equivalent to the following command (on a release build):
+// `gizmo +new-tab` is equivalent to the following command (on a release build):
 //
 // ```
 // gdbus call --session --dest com.mitchellh.ghostty --object-path /com/mitchellh/ghostty --method org.gtk.Actions.Activate new-tab '[<@(tas) (0, [])>]' []
 // ```
 //
-// `ghostty +new-tab -e echo hello` would be equivalent to the following command (on a release build):
+// `gizmo +new-tab -e echo hello` would be equivalent to the following command (on a release build):
 //
 // ```
 // gdbus call --session --dest com.mitchellh.ghostty --object-path /com/mitchellh/ghostty --method org.gtk.Actions.Activate new-tab '[<@(tas) (0, ["-e" "echo" "hello"])>]' []

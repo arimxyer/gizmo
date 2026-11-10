@@ -10,7 +10,7 @@ there: it carries text and nothing else.
 Run it in a Ghostty started with the write prompt turned on, since
 `clipboard-write` defaults to `allow`:
 
-    ghostty --clipboard-write=ask
+    gizmo --clipboard-write=ask
 
 then, in that terminal:
 

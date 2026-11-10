@@ -1,8 +1,8 @@
-% GHOSTTY(1) Version @@VERSION@@ | Ghostty terminal emulator
+% GIZMO(1) Version @@VERSION@@ | Gizmo terminal emulator
 
 # NAME
 
-**ghostty** - Ghostty terminal emulator
+**gizmo** - Gizmo terminal emulator
 
 # DESCRIPTION
 

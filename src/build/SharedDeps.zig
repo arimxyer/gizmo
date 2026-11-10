@@ -18,7 +18,7 @@ options: *std.Build.Step.Options,
 help_strings: HelpStrings,
 metallib: ?*MetallibStep,
 unicode_tables: UnicodeTables,
-/// The animation data for `ghostty +boo`. Building it compiles a helper
+/// The animation data for `gizmo +boo`. Building it compiles a helper
 /// program that links zlib, so a libghostty-vt build leaves it null and
 /// never downloads zlib. `add` requires it, and the only artifacts a
 /// libghostty-vt build passes to `add` are the bench tools

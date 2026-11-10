@@ -13,8 +13,8 @@ const adw_version = @import("../apprt/gtk/adw_version.zig");
 
 pub const Options = struct {};
 
-/// The `version` command is used to display information about Ghostty. Recognized as
-/// either `+version` or `--version`.
+/// Display application version and build information.
+/// Recognized as `version`, `+version`, or `--version`.
 pub fn run(alloc: Allocator) !u8 {
     var buffer: [1024]u8 = undefined;
     const stdout_file: std.Io.File = .stdout();
@@ -32,7 +32,11 @@ pub fn run(alloc: Allocator) !u8 {
             .{commit_hash},
         );
     };
-    try stdout.print("Ghostty {s}\n\n", .{build_config.version_string});
+    const heading = if (comptime builtin.os.tag == .macos and build_config.app_runtime == .none)
+        "Ghostty {s}\n\n"
+    else
+        "Gizmo {s}\n\n";
+    try stdout.print(heading, .{build_config.version_string});
     if (tty) try stdout.print("\x1b]8;;\x1b\\", .{});
 
     try stdout.print("Version\n", .{});

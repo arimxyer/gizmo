@@ -691,6 +691,7 @@ const Subprocess = struct {
             // scripts still have a way to find the Ghostty binary when
             // running in Ghostty.
             try env.put("GHOSTTY_BIN_DIR", exe_dir);
+            try env.put("GHOSTTY_BIN_PATH", exe_bin_path);
 
             // Append if we have a path. We want to append so that ghostty is
             // the last priority in the path. If we don't have a path set

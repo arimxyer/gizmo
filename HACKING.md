@@ -257,6 +257,29 @@ with the proper flags to ensure we're suppressing known false positives.
 You can combine the same build args with `run-valgrind` that you can with
 `run`, such as specifying additional configurations after a trailing `--`.
 
+## Private GTK Testing
+
+Use a private display and temporary `HOME` and XDG directories for automated GTK tests.
+Apply that environment to the D-Bus daemon and all test processes, not only Gizmo.
+
+Use `test/gtk-session.conf` for tests that do not need desktop service activation.
+This configuration has no service directories, so it cannot start desktop portals or accessibility services.
+In the isolated environment, run:
+
+```sh
+GHOSTTY_RESOURCES_DIR="$PWD/zig-out/share/ghostty" GTK_A11Y=none \
+  dbus-run-session --config-file=test/gtk-session.conf -- \
+  ./zig-out/bin/gizmo --gtk-single-instance=false
+```
+
+`GTK_A11Y=none` applies only to these non-accessibility tests, not normal Gizmo launches.
+Accessibility tests must start their services explicitly inside the same isolated environment.
+
+A private bus with default service directories can activate helpers with the daemon's inherited desktop environment.
+An AT-SPI helper can then replace the desktop's accessibility socket and leave a dead path when the test ends.
+Record the host socket's identity before and after testing.
+Never delete the host socket or restart desktop services as routine test setup.
+
 ## Input Stack Testing
 
 The input stack is the part of the codebase that starts with a

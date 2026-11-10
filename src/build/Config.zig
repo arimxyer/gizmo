@@ -394,7 +394,7 @@ pub fn init(b: *std.Build, versions: Versions) !Config {
     config.installed_exe_path = b.option(
         []const u8,
         "installed-exe-path",
-        "Absolute path the ghostty executable will be installed at, written " ++
+        "Absolute path the gizmo executable will be installed at, written " ++
             "into the Linux desktop, D-Bus and systemd files. If not specified, " ++
             "they name the executable alone, which systemd only finds in " ++
             "/usr/bin or /usr/local/bin.",

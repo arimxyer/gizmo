@@ -8,7 +8,7 @@
 #     --leak-check=full \
 #     --num-callers=50 \
 #     --suppressions=valgrind.supp \
-#     ./zig-out/bin/ghostty
+#     ./zig-out/bin/gizmo
 #
 # You must gracefully exit Ghostty (do not SIGINT) by closing all windows
 # and quitting. Otherwise, we leave a number of GTK resources around.

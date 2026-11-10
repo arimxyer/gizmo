@@ -131,13 +131,12 @@ pub fn preferredDefaultFilePath(alloc: Allocator) ![]const u8 {
 
 const OpenFileError = error{
     FileNotFound,
-    FileIsEmpty,
     FileOpenFailed,
     NotAFile,
 };
 
-/// Opens the file at the given path and returns the file handle
-/// if it exists and is non-empty. This also constrains the possible
+/// Opens the file at the given path, including an empty saved file,
+/// if it exists. This also constrains the possible
 /// errors to a smaller set that we can explicitly handle.
 pub fn open(io: std.Io, path: []const u8) OpenFileError!std.Io.File {
     assert(std.fs.path.isAbsolute(path));
@@ -169,8 +168,6 @@ pub fn open(io: std.Io, path: []const u8) OpenFileError!std.Io.File {
         .file => {},
         else => return OpenFileError.NotAFile,
     }
-
-    if (stat.size == 0) return OpenFileError.FileIsEmpty;
 
     return file;
 }

@@ -40,4 +40,4 @@ Ghostty contributors <https://github.com/ghostty-org/ghostty/graphs/contributors
 
 # SEE ALSO
 
-**ghostty(1)**
+**gizmo(1)**

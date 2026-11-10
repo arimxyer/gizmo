@@ -86,7 +86,7 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
     // We don't currently support Windows because we use the exec syscall.
     if (comptime builtin.target.os.tag == .windows) {
         try stderr.print(
-            \\The `ghostty +edit-config` command is not supported on Windows.
+            \\The `gizmo +edit-config` command is not supported on Windows.
             \\Please edit the configuration file manually at the following path:
             \\
             \\

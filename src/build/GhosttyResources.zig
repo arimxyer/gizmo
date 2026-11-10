@@ -12,6 +12,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     var steps: std.ArrayList(*std.Build.Step) = .empty;
     errdefer steps.deinit(b.allocator);
 
+    // Native macOS resources accompany the unchanged bundle executable.
+    const cli_command = if (cfg.target.result.os.tag == .macos and
+        cfg.app_runtime == .none) "ghostty" else "gizmo";
+
     // This is the exe used to generate some build data.
     const build_data_exe = b.addExecutable(.{
         .name = "ghostty-build-data",
@@ -26,6 +30,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     });
 
     deps.help_strings.addImport(build_data_exe);
+    const build_data_options = b.addOptions();
+    build_data_options.addOption([]const u8, "cli_command", cli_command);
+    build_data_exe.root_module.addOptions("build_data_options", build_data_options);
 
     // Terminfo
     terminfo: {
@@ -124,7 +131,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+fish");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(.{}), "ghostty.fish");
+        _ = wf.addCopyFile(run.captureStdOut(.{}), b.fmt("{s}.fish", .{cli_command}));
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -139,7 +146,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+zsh");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(.{}), "_ghostty");
+        _ = wf.addCopyFile(run.captureStdOut(.{}), b.fmt("_{s}", .{cli_command}));
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -154,7 +161,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+bash");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(.{}), "ghostty.bash");
+        _ = wf.addCopyFile(run.captureStdOut(.{}), b.fmt("{s}.bash", .{cli_command}));
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -246,7 +253,7 @@ fn addLinuxAppResources(
     // Background:
     // https://developer.gnome.org/documentation/guidelines/maintainer/integrating.html
 
-    const name = b.fmt("Ghostty{s}", .{
+    const name = b.fmt("Gizmo{s}", .{
         switch (cfg.optimize) {
             .debug, .safe => " (Debug)",
             .fast, .small => "",
@@ -260,8 +267,8 @@ fn addLinuxAppResources(
         },
     });
 
-    // How the files below launch Ghostty. See -Dinstalled-exe-path.
-    const exe = cfg.installed_exe_path orelse "ghostty";
+    // How the files below launch Gizmo. See -Dinstalled-exe-path.
+    const exe = cfg.installed_exe_path orelse "gizmo";
 
     // Variables used by the templates.
     // Fields are nullable since unused fields trigger a build failure.

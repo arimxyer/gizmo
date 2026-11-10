@@ -153,7 +153,7 @@ in {
       };
     };
     testScript = {...}: ''
-      machine.succeed("su - ghostty -c 'ghostty +version'")
+      machine.succeed("su - ghostty -c 'gizmo +version'")
     '';
   };
 
@@ -174,7 +174,7 @@ in {
       bus_path = "/run/user/${toString user.uid}/bus";
       bus = "DBUS_SESSION_BUS_ADDRESS=unix:path=${bus_path}";
       gdbus = "${bus} gdbus";
-      ghostty = "${bus} ghostty";
+      ghostty = "${bus} gizmo";
       su = command: "su - ${user.name} -c '${command}'";
       gseval = "call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval";
       wm_class = su "${gdbus} ${gseval} global.display.focus_window.wm_class";
@@ -258,7 +258,7 @@ in {
       bus_path = "/run/user/${toString user.uid}/bus";
       bus = "DBUS_SESSION_BUS_ADDRESS=unix:path=${bus_path}";
       gdbus = "${bus} gdbus";
-      ghostty = "${bus} ghostty";
+      ghostty = "${bus} gizmo";
       su = command: "su - ${user.name} -c '${command}'";
       gseval = "call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval";
       wm_class = su "${gdbus} ${gseval} global.display.focus_window.wm_class";
@@ -317,7 +317,7 @@ in {
       bus_path = "/run/user/${toString user.uid}/bus";
       bus = "DBUS_SESSION_BUS_ADDRESS=unix:path=${bus_path}";
       gdbus = "${bus} gdbus";
-      ghostty = "${bus} ghostty";
+      ghostty = "${bus} gizmo";
       su = command: "su - ${user.name} -c '${command}'";
       gseval = "call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval";
       wm_class = su "${gdbus} ${gseval} global.display.focus_window.wm_class";
@@ -331,13 +331,13 @@ in {
         sleep 60
       '';
     in ''
-      # Thread count of the ghostty GUI process: the ghostty process with the
+      # Thread count of the gizmo GUI process: the gizmo process with the
       # most threads. The CLI also spawns 1-thread launcher/helper stubs (and
       # this very command matches the pgrep), but those are filtered by the max.
       def ghostty_threads():
           out = machine.succeed(
               "max=0; "
-              "for p in $(pgrep -f ghostty); do "
+              "for p in $(pgrep -f gizmo); do "
               "  n=$(ls /proc/$p/task 2>/dev/null | wc -l); "
               "  [ \"$n\" -gt \"$max\" ] && max=$n; "
               "done; "
@@ -370,7 +370,7 @@ in {
           baseline = ghostty_threads()
 
           # Ring the bells by running the script inside the focused window (type
-          # its path + Enter). A separate `ghostty -e` process can't open the
+          # its path + Enter). A separate `gizmo -e` process can't open the
           # display from the bare su environment, so we drive the open window.
           machine.send_chars("${ringBells}\n")
 

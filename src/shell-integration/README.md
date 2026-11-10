@@ -10,6 +10,12 @@ README or [ghostty.org](https://ghostty.org/docs)
 
 ## Implementation Details
 
+The application exports `GHOSTTY_BIN_PATH` as its full executable path.
+SSH integration calls this path directly.
+This preserves the native macOS bundle executable and the standalone `gizmo` executable.
+Build-generated completions and Vim helpers use the selected executable name.
+Native macOS bundle resources use `ghostty`; standalone resources use `gizmo`.
+
 ### Bash
 
 Automatic [Bash](https://www.gnu.org/software/bash/) shell integration works by

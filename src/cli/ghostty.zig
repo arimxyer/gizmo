@@ -26,9 +26,7 @@ const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
 const agent_control = @import("agent_control.zig");
 const global = @import("../global.zig");
 
-/// Special commands that can be invoked via CLI flags. These are all
-/// invoked by using `+<action>` as a CLI flag. The only exception is
-/// "version" which can be invoked additionally with `--version`.
+/// Helper commands accept bare names or the legacy `+<action>` syntax.
 pub const Action = enum {
     /// Output the version and exit
     version,
@@ -89,6 +87,18 @@ pub const Action = enum {
 
     /// Authenticated Gizmo Linux agent control and discovery.
     @"agent-control",
+
+    /// Only action.detectArgs calls this, for argv[1], never flag values.
+    pub fn detectDirectCommand(arg: []const u8) ?Action {
+        if (agent_control.directCommand(arg)) return .@"agent-control";
+        return std.meta.stringToEnum(Action, arg);
+    }
+
+    pub fn captureLaunch() void {
+        if (comptime @import("builtin").os.tag == .linux and
+            @import("../build_config.zig").app_runtime == .gtk)
+            @import("lifecycle.zig").captureLaunch();
+    }
 
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then

@@ -17,10 +17,11 @@ pub fn init(
 
     const manpages = [_]struct {
         name: []const u8,
+        installed_name: []const u8,
         section: []const u8,
     }{
-        .{ .name = "ghostty", .section = "1" },
-        .{ .name = "ghostty", .section = "5" },
+        .{ .name = "ghostty", .installed_name = "gizmo", .section = "1" },
+        .{ .name = "ghostty", .installed_name = "ghostty", .section = "5" },
     };
 
     inline for (manpages) |manpage| {
@@ -54,7 +55,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             markdown_output,
-            "share/ghostty/doc/" ++ manpage.name ++ "." ++ manpage.section ++ ".md",
+            "share/ghostty/doc/" ++ manpage.installed_name ++ "." ++ manpage.section ++ ".md",
         ).step);
 
         const generate_html = b.addSystemCommand(&.{"pandoc"});
@@ -69,7 +70,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             generate_html.captureStdOut(.{}),
-            "share/ghostty/doc/" ++ manpage.name ++ "." ++ manpage.section ++ ".html",
+            "share/ghostty/doc/" ++ manpage.installed_name ++ "." ++ manpage.section ++ ".html",
         ).step);
 
         const generate_manpage = b.addSystemCommand(&.{"pandoc"});
@@ -84,7 +85,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             generate_manpage.captureStdOut(.{}),
-            "share/man/man" ++ manpage.section ++ "/" ++ manpage.name ++ "." ++ manpage.section,
+            "share/man/man" ++ manpage.section ++ "/" ++ manpage.installed_name ++ "." ++ manpage.section,
         ).step);
     }
 

@@ -14,31 +14,28 @@ const Action = @import("../cli.zig").ghostty.Action;
 /// it's part of an on going completion like --<key>=. Working around this requires looking
 /// backward in the command line args to pretend the = is an empty string
 /// see: https://www.gnu.org/software/gnuastro/manual/html_node/Bash-TAB-completion-tutorial.html
-pub const completions = comptimeGenerateBashCompletions();
-
-fn comptimeGenerateBashCompletions() []const u8 {
+pub fn completions(comptime command: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(50000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
-        try writeBashCompletions(&counter.writer);
+        try writeBashCompletions(&counter.writer, command);
 
         var buf: [counter.count]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        try writeBashCompletions(&writer);
+        try writeBashCompletions(&writer, command);
         const final = buf;
         return final[0..writer.end];
     }
 }
 
-fn writeBashCompletions(writer: *std.Io.Writer) !void {
+fn writeBashCompletions(writer: *std.Io.Writer, comptime command: []const u8) !void {
     const pad1 = "  ";
     const pad2 = pad1 ++ pad1;
     const pad3 = pad2 ++ pad1;
     const pad4 = pad3 ++ pad1;
     const pad5 = pad4 ++ pad1;
 
-    try writer.writeAll(
-        \\_ghostty() {
+    try writer.writeAll("_" ++ command ++ "() {\n" ++
         \\
         \\  # compat: mapfile -t COMPREPLY < <( "$@" )
         \\  _compreply() {
@@ -333,7 +330,7 @@ fn writeBashCompletions(writer: *std.Io.Writer) !void {
         \\  return 0
         \\}
         \\
-        \\complete -o nospace -o bashdefault -F _ghostty ghostty
+    ++ "complete -o nospace -o bashdefault -F _" ++ command ++ " " ++ command ++ "\n" ++
         \\
     );
 }

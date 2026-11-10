@@ -95,7 +95,7 @@ zig build \
 
 The build options are covered in the next section, but this will build
 and install Ghostty to `/tmp/ghostty` with the prefix `/usr` (i.e. the
-binary will be at `/tmp/ghostty/usr/bin/ghostty`). This style is common
+binary will be at `/tmp/ghostty/usr/bin/gizmo`). This style is common
 for system packages which separate a build and install step, since the
 install step can then be done with a `mv` or `cp` command (from `/tmp/ghostty`
 to wherever the package manager expects it).
@@ -130,10 +130,10 @@ relevant to package maintainers:
   version, glibc, etc. Run `zig targets` to a get a full list of available
   targets.
 
-- `-Dinstalled-exe-path=$prefix/bin/ghostty`: The absolute path the
-  `ghostty` executable will be installed at, written into the desktop file,
+- `-Dinstalled-exe-path=$prefix/bin/gizmo`: The absolute path the
+  `gizmo` executable will be installed at, written into the desktop file,
   D-Bus service and systemd user service on Linux. The build can't work this
   out from `--prefix` itself. Without it, those files name the executable
-  alone (`ghostty`), and systemd only looks for that in standard directories
+  alone (`gizmo`), and systemd only looks for that in standard directories
   such as `/usr/bin` and `/usr/local/bin`. Set it for any other prefix, and
   leave `DESTDIR` out of it.

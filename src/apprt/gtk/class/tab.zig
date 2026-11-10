@@ -33,6 +33,26 @@ pub const Tab = extern struct {
     });
 
     pub const properties = struct {
+        pub const @"program-status" = struct {
+            pub const name = "program-status";
+            const impl = gobject.ext.defineProperty(name, Self, ?[:0]const u8, .{
+                .default = "none",
+                .accessor = gobject.ext.typedAccessor(Self, ?[:0]const u8, .{
+                    .getter = getProgramStatus,
+                }),
+            });
+        };
+
+        pub const @"program-status-message" = struct {
+            pub const name = "program-status-message";
+            const impl = gobject.ext.defineProperty(name, Self, ?[:0]const u8, .{
+                .default = "",
+                .accessor = gobject.ext.typedAccessor(Self, ?[:0]const u8, .{
+                    .getter = getProgramStatusMessage,
+                }),
+            });
+        };
+
         /// The active surface is the surface that should be receiving all
         /// surface-targeted actions. This is usually the focused surface,
         /// but may also not be focused if the user has selected a non-surface
@@ -169,6 +189,9 @@ pub const Tab = extern struct {
         /// The tooltip of this tab. This is usually bound to the active surface.
         tooltip: ?[:0]const u8 = null,
 
+        /// Tracks membership independently of the visible, possibly zoomed tree.
+        program_status_tree_handler: c_ulong = 0,
+
         // Template bindings
         split_tree: *SplitTree,
 
@@ -227,6 +250,16 @@ pub const Tab = extern struct {
 
         // Init our actions
         self.initActionMap();
+
+        const priv = self.private();
+        priv.program_status_tree_handler = SplitTree.signals.changed.connect(
+            priv.split_tree,
+            *Self,
+            programStatusTreeChanged,
+            self,
+            .{},
+        );
+        if (self.getSurfaceTree()) |tree| self.connectProgramStatusHandlers(tree);
     }
 
     fn initActionMap(self: *Self) void {
@@ -296,6 +329,68 @@ pub const Tab = extern struct {
         return priv.split_tree;
     }
 
+    /// Aggregate every pane, not only the focused pane. Priority is blocked >
+    /// error > done > working > idle > none. Equal states use split-tree order.
+    fn programStatusSurface(self: *Self) ?*Surface {
+        const tree = self.getSurfaceTree() orelse return null;
+        var best: ?*Surface = null;
+        var best_priority: u8 = 0;
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            const state = entry.view.getProgramStatusState() orelse continue;
+            const priority = CoreSurface.ProgramStatus.priority(state);
+            if (priority <= best_priority) continue;
+            best = entry.view;
+            best_priority = priority;
+        }
+        return best;
+    }
+
+    pub fn getProgramStatus(self: *Self) ?[:0]const u8 {
+        const surface = self.programStatusSurface() orelse return "none";
+        return surface.getProgramStatus();
+    }
+
+    pub fn getProgramStatusMessage(self: *Self) ?[:0]const u8 {
+        const surface = self.programStatusSurface() orelse return "";
+        return surface.getProgramStatusMessage();
+    }
+
+    pub fn refreshProgramStatus(self: *Self) void {
+        self.as(gobject.Object).notifyByPspec(properties.@"program-status".impl.param_spec);
+        self.as(gobject.Object).notifyByPspec(properties.@"program-status-message".impl.param_spec);
+    }
+
+    fn connectProgramStatusHandlers(self: *Self, tree: *const Surface.Tree) void {
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            inline for (.{ "program-status", "program-status-message" }) |property| {
+                _ = gobject.Object.signals.notify.connect(
+                    entry.view,
+                    *Self,
+                    propSurfaceProgramStatus,
+                    self,
+                    .{ .detail = property },
+                );
+            }
+        }
+    }
+
+    fn disconnectProgramStatusHandlers(self: *Self, tree: *const Surface.Tree) void {
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            _ = gobject.signalHandlersDisconnectMatched(
+                entry.view.as(gobject.Object),
+                .{ .data = true },
+                0,
+                0,
+                null,
+                null,
+                self,
+            );
+        }
+    }
+
     /// Returns true if this tab needs confirmation before quitting based
     /// on the various Ghostty configurations.
     pub fn getNeedsConfirmQuit(self: *Self) bool {
@@ -322,6 +417,14 @@ pub const Tab = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        if (priv.program_status_tree_handler != 0) {
+            gobject.signalHandlerDisconnect(
+                priv.split_tree.as(gobject.Object),
+                priv.program_status_tree_handler,
+            );
+            priv.program_status_tree_handler = 0;
+            if (self.getSurfaceTree()) |tree| self.disconnectProgramStatusHandlers(tree);
+        }
         if (priv.config) |v| {
             v.unref();
             priv.config = null;
@@ -361,12 +464,32 @@ pub const Tab = extern struct {
     //---------------------------------------------------------------
     // Signal handlers
 
+    fn programStatusTreeChanged(
+        _: *SplitTree,
+        old_tree: ?*const Surface.Tree,
+        new_tree: ?*const Surface.Tree,
+        self: *Self,
+    ) callconv(.c) void {
+        // Disconnect before SplitTree releases the old tree's surface references.
+        if (old_tree) |tree| self.disconnectProgramStatusHandlers(tree);
+        if (new_tree) |tree| self.connectProgramStatusHandlers(tree);
+    }
+
+    fn propSurfaceProgramStatus(
+        _: *Surface,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        self.refreshProgramStatus();
+    }
+
     fn propSplitTree(
         _: *SplitTree,
         _: *gobject.ParamSpec,
         self: *Self,
     ) callconv(.c) void {
         self.as(gobject.Object).notifyByPspec(properties.@"surface-tree".impl.param_spec);
+        self.refreshProgramStatus();
 
         // If our tree is empty we close the tab.
         const tree: *const Surface.Tree = self.getSurfaceTree() orelse &.empty;
@@ -490,7 +613,7 @@ pub const Tab = extern struct {
         // otherwise the overridden title if it exists, otherwise
         // the terminal title if it exists, otherwise a default string.
         const plain = plain: {
-            const default = "Ghostty";
+            const default = "Gizmo";
             const config_title: ?[*:0]const u8 = title: {
                 const config = config_ orelse break :title null;
                 break :title config.get().title orelse null;
@@ -563,6 +686,8 @@ pub const Tab = extern struct {
                 properties.title.impl,
                 properties.@"title-override".impl,
                 properties.tooltip.impl,
+                properties.@"program-status".impl,
+                properties.@"program-status-message".impl,
             });
 
             // Bindings

@@ -27,8 +27,8 @@ Gizmo is a Linux fork of [Ghostty](https://github.com/ghostty-org/ghostty).
 It adds authenticated local agent control, custom native panels, tool workflows,
 and switchable horizontal or vertical tabs.
 
-The build currently retains Ghostty's executable name and default application
-identity. The shared terminal engine and upstream platform code remain intact.
+The application executable is `gizmo`. It retains Ghostty's default application
+identity and configuration paths. The shared terminal engine and upstream platform code remain intact.
 
 **`libghostty`** is a cross-platform, zero-dependency C and Zig library
 for building terminal emulators or utilizing terminal functionality
@@ -40,116 +40,140 @@ for smaller examples of using `libghostty` in C and Zig.
 
 For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
-## Gizmo: agent control
+## Gizmo: unified CLI
 
 Build the Linux application with `zig build -Doptimize=ReleaseFast`.
-See [HACKING.md](HACKING.md) for build dependencies.
+See [HACKING.md](HACKING.md) for dependencies.
+The executable is `zig-out/bin/gizmo`.
+The examples below assume its directory is on `PATH`.
 
-Agent control is disabled by default. To enable it, start a dedicated instance:
-
-```sh
-export GIZMO_AGENT_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-./zig-out/bin/ghostty --class=org.gizmo.Terminal --gtk-single-instance=true
-```
-
-In a shell with the same token and session bus, inspect the API:
+One executable launches the application, runs utilities, manages saved data,
+and controls running instances:
 
 ```sh
-./zig-out/bin/ghostty +agent-control --class=org.gizmo.Terminal \
-  --request='{"method":"discover"}'
-./zig-out/bin/ghostty +agent-control --class=org.gizmo.Terminal \
-  --request='{"method":"tree"}'
+gizmo
+gizmo list-fonts
+gizmo start -- --class=org.gizmo.Terminal
+gizmo instances
+gizmo inspect --instance=ID
+gizmo stop --instance=ID
+gizmo restart --instance=ID
 ```
 
-`discover` lists methods, action parameters, keys, configuration keys, and GTK
-actions. `tree` returns stable window, tab, and terminal surface IDs.
+`gizmo` launches normally. `start` launches an independent controlled instance
+and enables agent access for that process only.
+Arguments after `start --` are application launch arguments, including `-e` commands.
+The start command returns after the authenticated endpoint becomes available.
+
+Stop uses normal application close confirmation.
+Restart waits for the selected process to exit before starting its replacement.
+It preserves launch arguments and working directory, not terminal sessions.
+If closing does not complete, restart must not create a replacement.
+
+Use `instances` to find instance IDs.
+If multiple instances exist, select one with `--instance=ID`.
+Ambiguous commands do not silently choose an application.
+Utility commands do not need a running window.
+Existing `+list-fonts`-style utility syntax remains available.
+
+### Saved configuration and live overrides
+
+Configuration commands read and edit saved settings by default.
+They do not need D-Bus or a running application:
+
+```sh
+gizmo config get font-size
+gizmo config set font-size 16
+gizmo config reset font-size
+gizmo config validate
+```
+
+Saved edits preserve comments and unrelated settings.
+Set replaces that key's assignments in the preferred file.
+For repeatable keys, the supplied lines replace that file's entries in order.
+Included files retain their normal precedence and can override these saved values.
+Reset removes the key's assignments from the preferred user file; included files remain unchanged.
+Saved writes do not silently change an already running instance.
+The fork still uses Ghostty's configuration location by default.
+
+Use `--live` for the selected instance's effective configuration or session overrides:
+
+```sh
+gizmo config get font-size --live --instance=ID
+gizmo config set font-size 18 --live --instance=ID
+gizmo config reload --instance=ID
+```
+
+Reload is inherently live. It reads saved configuration and original launch arguments.
+Settings retain their normal runtime or new-terminal semantics.
+
+### Agent control
+
+Normal launches disable agent control by default.
+Enable it persistently when trusted local agents need access:
+
+```sh
+gizmo agent enable
+gizmo --class=org.gizmo.Terminal
+```
+
+The enable command preserves the user configuration text and records
+`agent-control = true`. Restart an already running instance after enabling it.
+Use a separate class when running this fork alongside installed Ghostty.
+`agent disable` persists the disabled setting and revokes the selected endpoint.
+
+Gizmo creates private credentials. The CLI discovers the running instance;
+you do not need to copy tokens or know its D-Bus name:
+
+```sh
+gizmo inspect
+gizmo tabs list
+gizmo terminal read SURFACE
+gizmo terminal send SURFACE --text-file=command.txt
+gizmo terminal action SURFACE new_split:right
+gizmo terminal status SURFACE
+```
+
+`inspect` returns stable window, tab, and surface IDs.
 Unrealized terminal leaves expose `ready: false` and a widget ID.
 Select their tab before sending terminal input.
 
-The interface supports:
+### JSON and direct commands
 
-- Terminal text, scrollback, grid size, and cursor inspection.
-- Rendered window images through `screen.capture`.
-- Native widget inspection and interaction through `ui.tree` and `ui.action`.
-- Existing terminal actions, text input, key events, pointer input, scrolling,
-  and GTK actions.
-- Live configuration through `config.get`, `config.set`, `config.reset`, and
-  `config.reload`.
-- Custom panels and tool workflows through `extensions.*`.
+`agent discover` describes methods, action parameters, physical keys, settings,
+and application/window GTK actions.
+The direct commands also accept `--params=JSON` and `--params-file=PATH`.
+Use `-` to read a file argument from stdin.
 
-Use a surface ID from `tree` when sending terminal actions:
+For complete JSON requests:
 
-```json
-{"method":"action","params":{"surface":"123","action":"new_split:right"}}
+```sh
+gizmo agent request --request-file=request.json
+gizmo agent request --request='{"method":"ui.tree"}'
 ```
 
-Configuration changes remain session-local unless `persist_path` explicitly
-names an absolute file:
+`screen.read` returns terminal text/history, dimensions, and cursor position.
+`screen.capture` returns a rendered window PNG.
+`ui.tree` and `ui.action` inspect and operate native controls.
+`input.text`, `input.key`, `input.mouse`, and `input.scroll` use existing terminal
+input paths. Binding and GTK actions use the same handlers as normal UI actions.
 
-```json
-{"method":"config.set","params":{"text":"font-size = 16\ngtk-tabs-orientation = vertical"}}
-```
-
-Persistence atomically replaces the named file with the full canonical
-configuration. `config.reload` reloads configuration files and launch arguments.
-Settings retain their existing runtime or new-terminal semantics.
-
-### Custom panels and workflows
-
-`extensions.discover` returns the definition format and working examples.
-Panels support labels, entries, buttons, toggles, and selections.
-Agents can inspect state, change values, replace definitions, or apply JSON
-Merge Patch.
-
-This request installs a native panel without executing its tool:
-
-```json
-{
-  "method": "extensions.install",
-  "params": {
-    "definition": {
-      "id": "hello",
-      "title": "Gizmo tools",
-      "elements": [
-        {"id": "name", "type": "entry", "label": "Name", "text": "Gizmo"},
-        {
-          "id": "run",
-          "type": "button",
-          "label": "Run",
-          "action": {
-            "type": "workflow",
-            "argv": ["/usr/bin/printf", "Hello %s\n", {"element": "name"}]
-          }
-        }
-      ]
-    }
-  }
-}
-```
-
-Invoke the button explicitly:
-
-```json
-{"method":"extensions.invoke","params":{"id":"hello","element":"run"}}
-```
-
-Inspect the returned job ID with `extensions.inspect`.
-Jobs expose output, exit status, cancellation, and timeout results.
-Arguments remain separate; element values do not undergo shell interpolation.
-Jobs have bounded output and execution time.
-Cancellation kills the tool's process group. Descendants that create another
-session or process group are not tracked.
-
-Extensions remain session-local. Save definitions externally to reinstall them.
-Closing a panel hides it. Removing it cancels its jobs.
+Raw `config.get`, `config.set`, `config.reset`, and `config.reload` remain live API methods.
+Raw changes remain session-local unless `persist_path` names an absolute file.
+That explicit persistence replaces the file with the complete canonical configuration.
 
 ### Security and protocol
 
-Treat the token as shell access. Grant it only to trusted agents.
-This interface is not a sandbox. Child processes inherit the application
-environment.
+Treat agent access as shell access, not as a sandbox.
+Enable it only for trusted local agents.
+Generated credentials remain in application memory and private discovery files;
+Gizmo does not add them to child-process environments.
 
-The endpoint uses the session bus, not TCP:
+Discovery uses `$XDG_RUNTIME_DIR/gizmo`, with directory mode `0700` and file
+mode `0600`. The CLI checks ownership, file type, permissions, and the live
+D-Bus peer PID. Instance listings do not expose credentials.
+
+The transport remains session D-Bus, not TCP:
 
 - Interface: `org.gizmo.Agent1`
 - Object: `/org/gizmo/Agent1`
@@ -158,39 +182,156 @@ The endpoint uses the session bus, not TCP:
 - Success: `{"ok":true,"result":...}`
 - Failure: D-Bus error `org.gizmo.Agent1.Error`
 
-The CLI adds the environment token automatically. CLI failures return JSON and
-a nonzero exit status.
+Control, saved-data, and lifecycle commands return JSON and a nonzero status on failure.
 Requests are limited to 1 MiB; responses are limited to 16 MiB.
+The explicit `GIZMO_AGENT_TOKEN`/`--class` path and `+agent-control` raw command
+remain available for manually managed connections.
+Explicit raw revocation uses `config.set` with `agent-control = false` and
+`revoke_agent_control: true`.
 
-Screen images cover Gizmo's rendered window content, not other applications or
-compositor decorations. Terminal text does not represent embedded images.
-Unrendered windows return an explicit capture error.
+Screen images cover Gizmo's rendered window content, not compositor decorations
+or other applications. Unrendered windows return an explicit capture error.
+Terminal text does not represent embedded images.
 
-## Gizmo: horizontal and vertical tabs
+## Gizmo: reusable extensions
 
-Use **Main Menu → Gizmo Tab Orientation** to switch layouts without restarting
-terminal sessions.
+An extension defines named actions independently of its optional panel.
+Actions can appear in the real command palette without creating a window.
+Native buttons, palette entries, and authenticated API calls share one dispatcher.
 
-For a persistent default, add this configuration:
+`extensions discover` returns schemas and complete examples without starting Gizmo.
+Saved definition commands work offline by default.
+Use `--live` to inspect or change a running instance's loaded extensions.
+Invoking actions, inspecting runtime context, and saving or loading runtime state are inherently live.
+
+For an immediate interactive installation, save parameters in a JSON file, then run:
+
+```sh
+gizmo extensions install --live --params-file=extension.json
+gizmo extensions invoke hello --action=run
+```
+
+For example, `extension.json` can contain:
+
+```json
+{
+  "definition": {
+    "id": "hello",
+    "title": "Gizmo tools",
+    "panel": true,
+    "actions": [
+      {
+        "id": "run",
+        "title": "Print greeting",
+        "type": "workflow",
+        "context": "none",
+        "argv": ["/usr/bin/printf", "Hello %s\n", { "state": "name" }]
+      }
+    ],
+    "elements": [
+      { "id": "name", "type": "entry", "label": "Name", "text": "Gizmo" },
+      { "id": "run-button", "type": "button", "label": "Run", "action": "run" }
+    ]
+  }
+}
+```
+
+Omit the panel and elements for a headless capability.
+Panels support labels, entries, buttons, toggles, and selections.
+Agents can inspect state, update values, and apply JSON Merge Patch.
+Installing, restoring, reading, and changing state never execute actions.
+
+Terminal actions resolve caller, focused, or explicitly supplied runtime context.
+Definitions cannot store surface IDs that become stale after restart.
+For an explicit target, invoke with `context: {"surface": "ID from inspect"}`.
+Existing actions such as `new_tab` and `new_split:right` create terminals.
+`extensions.context` exposes resolved context and OSC status as inspection data.
+
+Workflow arguments remain separate, without implicit shell interpolation.
+Arguments can read an element, state value, or workspace/cwd/surface context.
+Jobs run asynchronously with bounded output, deadlines, cancellation, and
+inspectable stdout/stderr, exit status, and lossless base64 streams.
+Cancellation kills the tool's process group.
+Descendants that create another session or process group are not tracked.
+
+### Persistence and workspaces
+
+Install saved extensions without starting the application:
+
+```sh
+gizmo extensions install --params-file=extension.json
+gizmo extensions list
+gizmo extensions inspect hello
+gizmo extensions export hello
+```
+
+Definitions and state live in
+`$XDG_DATA_HOME/gizmo/extensions/catalog.json`, with the standard user-data fallback.
+Writers lock the catalog across each update and replace it atomically.
+Offline edits do not change a running instance's loaded definitions.
+
+For live installations, use `persist: true` or call `extensions.save` explicitly.
+
+App-scoped state is shared within the application.
+Workspace-scoped state uses an explicit canonical directory.
+Use `extensions.load` with a workspace to select its saved state.
+A missing workspace slot starts from defaults, never another workspace's values.
+Save/update cannot silently switch workspace keys.
+
+Definitions restore inertly after agent access is enabled.
+Workspace definitions require an explicit workspace load before use.
+Persistent API state updates save automatically; native field edits require save.
+Saved `extensions.export` returns installation-compatible data.
+Use `--live` to export current runtime state instead.
+Saved removal does not cancel running actions.
+Live removal cancels jobs and also removes saved state when the extension is persistent.
+Closing a panel only hides it; hidden panels do not keep the application alive.
+
+## Gizmo: program status
+
+Gizmo consumes the existing [Program Status Protocol, OSC 7501](https://www.superlogical.com/rex/docs/build/program-status).
+Programs can report identity, idle/working/done/blocked/error state, progress,
+messages, and named child records. Programs must emit reports themselves;
+Gizmo does not infer agent identity from terminal text.
+
+Each pane keeps bounded records. Prompt/process-exit events remove transient
+working/blocked records; completed/error records survive. Full reset clears all.
+Tab indicators aggregate every pane, including panes hidden by split zoom.
+Summary priority is blocked, error, done, working, then idle.
+
+Use `terminal status SURFACE`, `status.list`, or `status.get` to inspect records.
+The same information is available to extension context inspection.
+Reports are untrusted data. They never authorize commands or grant permission.
+
+## Gizmo: tabs and collapsible sidebar
+
+The default is vertical tabs with a compact rail.
+Click the sidebar toggle to open an expanded overlay.
+Expansion is not hover-driven and does not resize the terminal grid.
+Hiding the rail releases its width to the terminal.
 
 ```ini
 gtk-tabs-orientation = vertical
+gtk-sidebar-state = compact
 ```
 
-The default is `horizontal`. Horizontal tabs retain their top or bottom placement.
-Vertical tabs use a left sidebar with selection, close, rename, reorder, and
-new-window controls.
+Sidebar states are `compact`, `expanded`, and `hidden`.
+Horizontal tabs remain available and retain top/bottom placement.
+Explicit `window-show-tab-bar = never` hides the vertical sidebar.
 
-The GTK actions `win.set-tabs-orientation` and `win.toggle-tabs-orientation`
-change one window for the current session:
+Rows use middle-truncated titles, status/attention indicators, and contextual
+close controls. Right-click or Menu/Shift+F10 opens tab operations.
+Middle-click closes; drag reorders or transfers tabs between windows.
+Move to New Window remains available in the context menu.
 
-```json
-{"method":"gtk.action","params":{"surface":"123","name":"win.set-tabs-orientation","parameter":"'vertical'"}}
-```
+After focusing the list, arrows/Home/End navigate, Enter returns to the terminal,
+Escape collapses and returns focus, F2 renames, and Delete closes.
+Close confirmation remains active when configured.
 
-`gtk.actions` exposes each window's orientation action and state.
-Explicit configuration updates reset session overrides. Soft theme changes
-preserve them.
+GTK actions expose `win.set-tabs-orientation`, `win.set-sidebar-state`,
+`win.toggle-sidebar`, and `win.focus-tab-list`.
+Stateful actions accept strings and are discoverable through `gtk.actions`.
+Explicit configuration updates reset session overrides; soft theme changes preserve them.
 
 These Gizmo features currently target Linux GTK only.
 

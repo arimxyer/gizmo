@@ -221,6 +221,36 @@ pub const Window = extern struct {
             });
         };
 
+        pub const @"sidebar-expanded" = struct {
+            pub const name = "sidebar-expanded";
+            const impl = gobject.ext.defineProperty(name, Self, bool, .{
+                .default = false,
+                .accessor = gobject.ext.typedAccessor(Self, bool, .{
+                    .getter = Self.getSidebarExpanded,
+                }),
+            });
+        };
+
+        pub const @"headerbar-new-tab-visible" = struct {
+            pub const name = "headerbar-new-tab-visible";
+            const impl = gobject.ext.defineProperty(name, Self, bool, .{
+                .default = true,
+                .accessor = gobject.ext.typedAccessor(Self, bool, .{
+                    .getter = Self.getHeaderbarNewTabVisible,
+                }),
+            });
+        };
+
+        pub const @"sidebar-controls-visible" = struct {
+            pub const name = "sidebar-controls-visible";
+            const impl = gobject.ext.defineProperty(name, Self, bool, .{
+                .default = false,
+                .accessor = gobject.ext.typedAccessor(Self, bool, .{
+                    .getter = Self.getSidebarControlsVisible,
+                }),
+            });
+        };
+
         pub const @"toolbar-style" = struct {
             pub const name = "toolbar-style";
             const impl = gobject.ext.defineProperty(
@@ -269,6 +299,7 @@ pub const Window = extern struct {
 
         /// A per-window, session-only override. Config reload clears it.
         tabs_orientation: ?configpkg.Config.GtkTabsOrientation = null,
+        sidebar_state: ?configpkg.Config.GtkSidebarState = null,
         vertical_tabs_initialized: bool = false,
 
         /// Binding group for our active tab.
@@ -379,7 +410,7 @@ pub const Window = extern struct {
 
         // Initialize our actions
         self.initActionMap();
-        vertical_tabs.init(priv.tab_list, priv.tab_view);
+        vertical_tabs.init(priv.tab_list, priv.tab_view, self);
         priv.vertical_tabs_initialized = true;
 
         // Start states based on config.
@@ -414,7 +445,11 @@ pub const Window = extern struct {
             .init("about", actionAbout, null),
             .init("close", actionClose, null),
             .init("close-tab", actionCloseTab, s_variant_type),
-            .initStateful("set-tabs-orientation", actionSetTabsOrientation, s_variant_type, glib.Variant.newString("horizontal")),
+            .initStateful("set-tabs-orientation", actionSetTabsOrientation, s_variant_type, glib.Variant.newString("vertical")),
+            .initStateful("set-sidebar-state", actionSetSidebarState, s_variant_type, glib.Variant.newString("compact")),
+            .init("toggle-sidebar", actionToggleSidebar, null),
+            .init("focus-tab-list", actionFocusTabList, null),
+            .init("context-tab-operation", actionContextTabOperation, s_variant_type),
             .init("toggle-tabs-orientation", actionToggleTabsOrientation, null),
             .init("new-tab", actionNewTab, null),
             .init("new-window", actionNewWindow, null),
@@ -437,6 +472,18 @@ pub const Window = extern struct {
         };
 
         ext.actions.add(Self, self, &actions);
+        inline for (.{
+            .{ "set-tabs-orientation", actionSetTabsOrientation },
+            .{ "set-sidebar-state", actionSetSidebarState },
+        }) |entry| {
+            const action = gobject.ext.cast(gio.SimpleAction, self.as(gio.ActionMap).lookupAction(entry[0]).?).?;
+            _ = gio.SimpleAction.signals.change_state.connect(action, *Self, entry[1], self, .{});
+            const states: []const ?[*:0]const u8 = if (comptime std.mem.eql(u8, entry[0], "set-sidebar-state"))
+                &.{ "compact", "expanded", "hidden" }
+            else
+                &.{ "horizontal", "vertical" };
+            action.setStateHint(glib.Variant.newStrv(states.ptr, @intCast(states.len)));
+        }
     }
 
     /// Winproto backend for this window.
@@ -719,11 +766,14 @@ pub const Window = extern struct {
         // Trigger all our dynamic properties that depend on the config.
         inline for (&.{
             "headerbar-visible",
+            "headerbar-new-tab-visible",
             "tabs-autohide",
             "tabs-inverted",
             "tabs-visible",
             "tabs-wide",
             "sidebar-visible",
+            "sidebar-expanded",
+            "sidebar-controls-visible",
             "toolbar-style",
             "titlebar-style",
         }) |key| {
@@ -750,6 +800,13 @@ pub const Window = extern struct {
         if (self.as(gio.ActionMap).lookupAction("set-tabs-orientation")) |base| {
             if (gobject.ext.cast(gio.SimpleAction, base)) |action| {
                 action.setState(glib.Variant.newString(@tagName(self.getTabsOrientation()).ptr));
+            }
+        }
+        priv.tab_sidebar.as(gtk.Widget).setSizeRequest(if (self.getSidebarExpanded()) 240 else 48, -1);
+        self.toggleCssClass("sidebar-compact", !self.getSidebarExpanded());
+        if (self.as(gio.ActionMap).lookupAction("set-sidebar-state")) |base| {
+            if (gobject.ext.cast(gio.SimpleAction, base)) |action| {
+                action.setState(glib.Variant.newString(@tagName(self.getSidebarState()).ptr));
             }
         }
 
@@ -1154,9 +1211,33 @@ pub const Window = extern struct {
     }
 
     fn getSidebarVisible(self: *Self) bool {
-        return self.getTabsOrientation() == .vertical and
-            self.getTabStripVisible() and
-            (!self.getTabsAutohide() or self.private().tab_view.getNPages() > 1);
+        if (self.getTabsOrientation() != .vertical or self.isQuickTerminal()) return false;
+        const config = if (self.private().config) |value| value.get() else return false;
+        return config.@"window-show-tab-bar" != .never and self.getSidebarState() != .hidden;
+    }
+
+    pub fn getSidebarState(self: *Self) configpkg.Config.GtkSidebarState {
+        if (self.private().sidebar_state) |state| return state;
+        const config = if (self.private().config) |value| value.get() else return .compact;
+        return config.@"gtk-sidebar-state";
+    }
+
+    pub fn getSidebarExpanded(self: *Self) bool {
+        return self.getSidebarState() == .expanded;
+    }
+
+    fn getHeaderbarNewTabVisible(self: *Self) bool {
+        // The expanded sidebar supplies its own New Tab split button.
+        return !self.getSidebarVisible() or !self.getSidebarExpanded();
+    }
+
+    fn getSidebarControlsVisible(self: *Self) bool {
+        return self.getSidebarVisible() and !self.getHeaderbarVisible();
+    }
+
+    pub fn setSidebarState(self: *Self, state: configpkg.Config.GtkSidebarState) void {
+        self.private().sidebar_state = state;
+        self.syncAppearance();
     }
 
     /// The effective orientation can be inspected through the state of
@@ -1164,7 +1245,7 @@ pub const Window = extern struct {
     pub fn getTabsOrientation(self: *Self) configpkg.Config.GtkTabsOrientation {
         const priv = self.private();
         if (priv.tabs_orientation) |value| return value;
-        const config = if (priv.config) |value| value.get() else return .horizontal;
+        const config = if (priv.config) |value| value.get() else return .vertical;
         return config.@"gtk-tabs-orientation";
     }
 
@@ -1172,6 +1253,7 @@ pub const Window = extern struct {
     /// changes preserve the user's current tab presentation.
     pub fn resetTabsOrientation(self: *Self) void {
         self.private().tabs_orientation = null;
+        self.private().sidebar_state = null;
         self.syncAppearance();
     }
 
@@ -1185,7 +1267,8 @@ pub const Window = extern struct {
                 // style is tabs, and gtk-titlebar-hide-when-maximized is set.
                 if (self.isMaximized() and config.@"gtk-titlebar-hide-when-maximized") return false;
 
-                // If the titlebar style is tabs the tab bar must always be visible.
+                // This bar holds the horizontal titlebar controls, even for
+                // window-show-tab-bar=never. Vertical sidebar visibility is separate.
                 return true;
             },
             .native => {
@@ -1455,7 +1538,7 @@ pub const Window = extern struct {
     ) callconv(.c) ?[*:0]const u8 {
         if (title_override_) |v| return glib.ext.dupeZ(u8, std.mem.span(v));
         if (title_) |v| return glib.ext.dupeZ(u8, std.mem.span(v));
-        return glib.ext.dupeZ(u8, "Ghostty");
+        return glib.ext.dupeZ(u8, "Gizmo");
     }
 
     fn closureSubtitle(
@@ -1839,6 +1922,7 @@ pub const Window = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
+        if (self.private().context_menu_page == page) self.private().context_menu_page = null;
         // We need to get the tab to disconnect the signals.
         const child = page.getChild();
         const tab = gobject.ext.cast(Tab, child) orelse return;
@@ -2075,7 +2159,7 @@ pub const Window = extern struct {
         _: ?*glib.Variant,
         self: *Self,
     ) callconv(.c) void {
-        const name = "Ghostty";
+        const name = "Gizmo";
         const icon = "com.mitchellh.ghostty";
         const website = "https://ghostty.org";
 
@@ -2121,6 +2205,31 @@ pub const Window = extern struct {
             .vertical => .horizontal,
         };
         self.syncAppearance();
+    }
+
+    fn actionSetSidebarState(_: *gio.SimpleAction, parameter: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const value = parameter orelse return;
+        const state = std.meta.stringToEnum(configpkg.Config.GtkSidebarState, std.mem.span(value.getString(null))) orelse return;
+        self.setSidebarState(state);
+    }
+
+    fn actionToggleSidebar(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.setSidebarState(if (self.getSidebarExpanded()) .compact else .expanded);
+    }
+
+    fn actionFocusTabList(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        if (self.getTabsOrientation() != .vertical) {
+            self.private().tabs_orientation = .vertical;
+        }
+        if (self.getSidebarState() == .hidden) self.private().sidebar_state = .compact;
+        self.syncAppearance();
+        if (self.getSidebarVisible()) vertical_tabs.focus(self.private().tab_list);
+    }
+
+    fn actionContextTabOperation(_: *gio.SimpleAction, parameter: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const page = self.private().context_menu_page orelse return;
+        const value = parameter orelse return;
+        vertical_tabs.operate(self, page, std.mem.span(value.getString(null)));
     }
 
     fn actionClose(
@@ -2413,12 +2522,15 @@ pub const Window = extern struct {
                 properties.config.impl,
                 properties.debug.impl,
                 properties.@"headerbar-visible".impl,
+                properties.@"headerbar-new-tab-visible".impl,
                 properties.@"quick-terminal".impl,
                 properties.@"tabs-autohide".impl,
                 properties.@"tabs-inverted".impl,
                 properties.@"tabs-visible".impl,
                 properties.@"tabs-wide".impl,
                 properties.@"sidebar-visible".impl,
+                properties.@"sidebar-expanded".impl,
+                properties.@"sidebar-controls-visible".impl,
                 properties.@"toolbar-style".impl,
                 properties.@"titlebar-style".impl,
                 properties.@"title-override".impl,

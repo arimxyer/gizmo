@@ -230,3 +230,94 @@ label.resize-overlay {
   margin: 0;
   padding: 0;
 }
+
+/*
+ * Gizmo tab rail. GtkListBox supplies native hover, selection, and focus.
+ * The overlay does not participate in terminal width measurement.
+ */
+.gizmo-sidebar {
+  background-color: var(--sidebar-bg-color);
+  color: var(--sidebar-fg-color);
+  border-right: 1px solid var(--border-color);
+}
+
+.gizmo-sidebar:dir(rtl) {
+  border-right: none;
+  border-left: 1px solid var(--border-color);
+}
+
+.gizmo-sidebar-toggle {
+  min-height: 36px;
+  margin: 4px;
+}
+
+.gizmo-sidebar-header {
+  min-height: 46px;
+  padding: 0 4px;
+}
+
+.gizmo-sidebar-new-tab {
+  margin: 4px 0;
+}
+
+.gizmo-tab-list {
+  padding: 2px 4px;
+  background: transparent;
+}
+
+.gizmo-tab-list > .gizmo-tab-row {
+  min-height: 36px;
+  padding: 0 4px;
+  margin: 0;
+}
+
+.gizmo-tab-index {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+}
+
+.gizmo-tab-close {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  opacity: 0;
+}
+
+.gizmo-tab-row:hover .gizmo-tab-close,
+.gizmo-tab-row:selected .gizmo-tab-close,
+.gizmo-tab-row:focus-within .gizmo-tab-close {
+  opacity: 1;
+}
+
+.gizmo-tab-row.needs-attention {
+  box-shadow: inset 2px 0 var(--accent-color);
+}
+
+.gizmo-tab-status {
+  background-color: var(--sidebar-bg-color);
+  border-radius: 50%;
+}
+
+.gizmo-tab-status.done {
+  color: var(--success-color);
+}
+.gizmo-tab-status.blocked {
+  color: var(--warning-color);
+}
+.gizmo-tab-status.error {
+  color: var(--error-color);
+}
+.gizmo-tab-status.working {
+  color: var(--accent-color);
+}
+
+.sidebar-compact .gizmo-tab-list {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.gizmo-tab-close-compact {
+  min-width: 12px;
+  min-height: 12px;
+  background-color: var(--sidebar-bg-color);
+}

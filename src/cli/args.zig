@@ -1314,8 +1314,8 @@ test "parseIntoField: tagged union missing tag" {
 /// iterates through an underlying iterator and increments a counter
 /// to track the current CLI arg index.
 ///
-/// This also ignores any argument that starts with `+`. It assumes that
-/// actions were parsed out before this iterator was created.
+/// Ignore legacy `+ACTION` markers before the command boundary.
+/// After `-e` or `--`, preserve every argument without interpretation.
 pub fn ArgsIterator(comptime Iterator: type) type {
     return struct {
         const Self = @This();
@@ -1328,6 +1328,10 @@ pub fn ArgsIterator(comptime Iterator: type) type {
         /// values yet.
         index: usize = 0,
 
+        /// Skip only a recognized bare utility in argv[1].
+        skip_bare_action: bool = false,
+        passthrough: bool = false,
+
         pub fn deinit(self: *Self) void {
             if (@hasDecl(Iterator, "deinit")) {
                 self.iterator.deinit();
@@ -1337,10 +1341,16 @@ pub fn ArgsIterator(comptime Iterator: type) type {
         pub fn next(self: *Self) ?[]const u8 {
             const value = self.iterator.next() orelse return null;
             self.index += 1;
+            if (self.passthrough) return value;
+            if (mem.eql(u8, value, "-e") or mem.eql(u8, value, "--")) {
+                self.passthrough = true;
+                return value;
+            }
+            if (self.index == 1 and self.skip_bare_action and
+                @import("ghostty.zig").Action.detectDirectCommand(value) != null)
+                return self.next();
 
-            // We ignore any argument that starts with "+". This is used
-            // to indicate actions and are expected to be parsed out before
-            // this iterator is created.
+            // Ignore legacy action markers only before the command boundary.
             if (value.len > 0 and value[0] == '+') return self.next();
 
             return value;
@@ -1361,7 +1371,7 @@ pub fn argsIterator(
     var iter: std.process.Args.Iterator = try .initAllocator(args, alloc_gpa);
     errdefer iter.deinit();
     _ = iter.next(); // skip argv0
-    return .{ .iterator = iter };
+    return .{ .iterator = iter, .skip_bare_action = true };
 }
 
 test "ArgsIterator" {
@@ -1379,6 +1389,19 @@ test "ArgsIterator" {
     try testing.expectEqualStrings("--a=42", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "ArgsIterator preserves child arguments after -e" {
+    const testing = std.testing;
+    const child = try std.process.Args.IteratorGeneral(.{}).init(
+        testing.allocator,
+        "-e gizmo +version config --class=child",
+    );
+    var iter: ArgsIterator(@TypeOf(child)) = .{ .iterator = child };
+    defer iter.deinit();
+    for ([_][]const u8{ "-e", "gizmo", "+version", "config", "--class=child" }) |expected|
+        try testing.expectEqualStrings(expected, iter.next().?);
+    try testing.expect(iter.next() == null);
 }
 
 /// Returns an iterator (implements "next") that reads CLI args by line.

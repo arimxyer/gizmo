@@ -12,6 +12,15 @@ pub const DetectError = error{
 
 /// Detect the action from CLI args.
 pub fn detectArgs(comptime E: type, alloc: Allocator, args: std.process.Args) !?E {
+    if (@hasDecl(E, "captureLaunch")) E.captureLaunch();
+    if (@hasDecl(E, "detectDirectCommand")) {
+        var direct = try args.iterateAllocator(alloc);
+        defer direct.deinit();
+        _ = direct.next(); // argv0
+        if (direct.next()) |first| {
+            if (E.detectDirectCommand(first)) |command| return command;
+        }
+    }
     var iter = try args.iterateAllocator(alloc);
     defer iter.deinit();
     return try detectIter(E, &iter);

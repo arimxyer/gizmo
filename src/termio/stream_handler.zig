@@ -359,6 +359,7 @@ pub const StreamHandler = struct {
             .report_pwd => try self.reportPwd(value.url),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
+            .program_status => try self.programStatus(value),
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
@@ -388,7 +389,6 @@ pub const StreamHandler = struct {
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -939,6 +939,7 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
     ) !void {
         self.terminal.fullReset();
+        self.surfaceMessageWriter(.program_status_changed);
         try self.setMouseShape(.text);
 
         // Full reset clears Kitty clipboard session grants.
@@ -1480,10 +1481,37 @@ pub const StreamHandler = struct {
         }
     }
 
+    /// This handler is the actual OSC 7501 consumer. Only this consumer path
+    /// answers queries; the parser and effect-free VT handler remain silent.
+    fn programStatus(
+        self: *StreamHandler,
+        command: terminal.osc.Command.ProgramStatus,
+    ) !void {
+        switch (command) {
+            .query => |terminator| switch (terminator) {
+                inline else => |t| self.messageWriter(.{
+                    .write_stable = "\x1b]7501;" ++
+                        terminal.osc.program_status.query_reply ++
+                        comptime t.string(),
+                }),
+            },
+            .report => |report| {
+                // The IO parser holds renderer_state.mutex here. Own all
+                // decoded fields before the parser can reuse its buffer.
+                if (try self.terminal.program_status.apply(self.alloc, report)) {
+                    self.surfaceMessageWriter(.program_status_changed);
+                }
+            },
+        }
+    }
+
     fn semanticPrompt(
         self: *StreamHandler,
         cmd: Stream.Action.SemanticPrompt,
     ) !void {
+        const status_count = self.terminal.program_status.records.items.len;
+        defer if (status_count != self.terminal.program_status.records.items.len)
+            self.surfaceMessageWriter(.program_status_changed);
         switch (cmd.action) {
             .end_input_start_output => {
                 self.surfaceMessageWriter(.start_command);

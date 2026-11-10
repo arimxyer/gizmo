@@ -3,7 +3,7 @@ runtime: org.gnome.Platform
 runtime-version: "50"
 sdk: org.gnome.Sdk
 default-branch: tip
-command: ghostty
+command: gizmo
 rename-icon: com.mitchellh.ghostty
 finish-args:
   # 3D rendering
@@ -41,7 +41,7 @@ modules:
         -Doptimize=Debug
         -Dcpu=baseline
         -Dflatpak=true
-        -Dinstalled-exe-path=/app/bin/ghostty
+        -Dinstalled-exe-path=/app/bin/gizmo
         -Dstrip=false
         -fno-sys=oniguruma
         --prefix /app

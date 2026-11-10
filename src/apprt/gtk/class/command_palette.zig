@@ -18,6 +18,7 @@ const Window = @import("window.zig").Window;
 const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
 const Config = @import("config.zig").Config;
+const extensions = @import("../agent_extensions.zig");
 
 const log = std.log.scoped(.gtk_ghostty_command_palette);
 
@@ -83,6 +84,7 @@ pub const CommandPalette = extern struct {
         /// The list that serves as the data source of the model.
         /// This is where all command data is ultimately stored.
         source: *gio.ListStore,
+        caller: WeakRef(Surface) = .empty,
 
         pub var offset: c_int = 0;
     };
@@ -122,6 +124,7 @@ pub const CommandPalette = extern struct {
         const priv = self.private();
 
         priv.source.removeAll();
+        priv.caller.deinit();
 
         if (priv.config) |config| {
             config.unref();
@@ -143,6 +146,10 @@ pub const CommandPalette = extern struct {
     // Signal Handlers
 
     fn propConfig(self: *CommandPalette, _: *gobject.ParamSpec, _: ?*anyopaque) callconv(.c) void {
+        self.refresh();
+    }
+
+    fn refresh(self: *CommandPalette) void {
         const priv = self.private();
 
         const config = priv.config orelse {
@@ -165,6 +172,9 @@ pub const CommandPalette = extern struct {
         };
 
         self.collectRegularCommands(config, &commands, alloc);
+        self.collectExtensionCommands(config, &commands, alloc) catch |err| {
+            log.warn("failed to collect extension actions: {}", .{err});
+        };
 
         // Sort commands
         std.mem.sort(*Command, commands.items, {}, struct {
@@ -204,6 +214,22 @@ pub const CommandPalette = extern struct {
                 log.warn("failed to add command to list: {}", .{err});
                 continue;
             };
+        }
+    }
+
+    fn collectExtensionCommands(
+        _: *CommandPalette,
+        config: *Config,
+        commands: *std.ArrayList(*Command),
+        alloc: Allocator,
+    ) !void {
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const entries = try extensions.paletteActions(Application.default(), arena.allocator());
+        for (entries) |entry| {
+            const cmd = try Command.newExtension(config, entry);
+            errdefer cmd.unref();
+            try commands.append(alloc, cmd);
         }
     }
 
@@ -271,11 +297,11 @@ pub const CommandPalette = extern struct {
 
         // Titles are equal - use sort_key as tie-breaker if both are jump commands
         const a_sort_key = switch (a.private().data) {
-            .regular => return false,
+            .regular, .extension => return false,
             .jump => |*ja| ja.sort_key,
         };
         const b_sort_key = switch (b.private().data) {
-            .regular => return false,
+            .regular, .extension => return false,
             .jump => |*jb| jb.sort_key,
         };
 
@@ -319,6 +345,10 @@ pub const CommandPalette = extern struct {
             return;
         }
 
+        // Capture the selected caller before the modal dialog takes focus.
+        priv.caller.set(window.getActiveSurface());
+        self.refresh();
+
         // Show the dialog
         priv.dialog.present(window.as(gtk.Widget));
 
@@ -335,6 +365,9 @@ pub const CommandPalette = extern struct {
         const object_ = priv.model.as(gio.ListModel).getObject(pos);
         defer if (object_) |object| object.unref();
 
+        const caller = priv.caller.get();
+        defer if (caller) |surface| surface.unref();
+
         // Close before running the action in order to avoid being replaced by
         // another dialog (such as the change title dialog). If that occurs then
         // the command palette dialog won't be counted as having closed properly
@@ -342,6 +375,14 @@ pub const CommandPalette = extern struct {
         self.close();
 
         const cmd = gobject.ext.cast(Command, object_ orelse return) orelse return;
+
+        if (cmd.private().data == .extension) {
+            const action = cmd.private().data.extension;
+            extensions.invokePalette(Application.default(), action.extension, action.action, caller) catch |err| {
+                log.warn("extension action failed: {}", .{err});
+            };
+            return;
+        }
 
         // Handle jump commands differently
         if (cmd.isJump()) {
@@ -540,12 +581,19 @@ const Command = extern struct {
         pub const CommandData = union(enum) {
             regular: RegularData,
             jump: JumpData,
+            extension: ExtensionData,
         };
 
         pub const RegularData = struct {
             command: input.Command,
             action: ?[:0]const u8 = null,
             action_key: ?[:0]const u8 = null,
+        };
+
+        pub const ExtensionData = struct {
+            extension: []const u8,
+            action: []const u8,
+            title: [:0]const u8,
         };
 
         pub const JumpData = struct {
@@ -571,6 +619,20 @@ const Command = extern struct {
             },
         };
 
+        return self;
+    }
+
+    pub fn newExtension(config: *Config, action: extensions.PaletteAction) !*Self {
+        const self = gobject.ext.newInstance(Self, .{ .config = config });
+        errdefer self.unref();
+        const priv = self.private();
+        const alloc = priv.arena.allocator();
+        priv.data = .{ .extension = undefined };
+        priv.data = .{ .extension = .{
+            .extension = try alloc.dupe(u8, action.extension),
+            .action = try alloc.dupe(u8, action.action),
+            .title = try alloc.dupeSentinel(u8, action.title, 0),
+        } };
         return self;
     }
 
@@ -608,7 +670,7 @@ const Command = extern struct {
         }
 
         switch (priv.data) {
-            .regular => {},
+            .regular, .extension => {},
             .jump => |*j| {
                 j.surface.deinit();
             },
@@ -638,7 +700,7 @@ const Command = extern struct {
 
         const regular = switch (priv.data) {
             .regular => |*r| r,
-            .jump => return null,
+            .jump, .extension => return null,
         };
 
         if (regular.action_key) |action_key| return action_key;
@@ -657,7 +719,7 @@ const Command = extern struct {
 
         const regular = switch (priv.data) {
             .regular => |*r| r,
-            .jump => return null,
+            .jump, .extension => return null,
         };
 
         if (regular.action) |action| return action;
@@ -682,6 +744,7 @@ const Command = extern struct {
 
         switch (priv.data) {
             .regular => |*r| return r.command.title,
+            .extension => |entry| return entry.title,
             .jump => |*j| {
                 if (j.title) |title| return title;
 
@@ -708,6 +771,7 @@ const Command = extern struct {
 
         switch (priv.data) {
             .regular => |*r| return r.command.description,
+            .extension => return "Gizmo extension action · explicit invocation",
             .jump => |*j| {
                 if (j.description) |desc| return desc;
 
@@ -738,7 +802,7 @@ const Command = extern struct {
         const priv = self.private();
         return switch (priv.data) {
             .regular => |*r| r.command.action,
-            .jump => null,
+            .jump, .extension => null,
         };
     }
 
@@ -753,7 +817,7 @@ const Command = extern struct {
     pub fn getJumpSurface(self: *Self) ?*Surface {
         const priv = self.private();
         return switch (priv.data) {
-            .regular => null,
+            .regular, .extension => null,
             .jump => |*j| j.surface.get(),
         };
     }

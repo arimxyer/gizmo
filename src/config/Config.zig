@@ -130,7 +130,7 @@ language: ?[:0]const u8 = null,
 ///
 /// You can generate the list of valid values using the CLI:
 ///
-///     ghostty +list-fonts
+///     gizmo +list-fonts
 ///
 /// This configuration can be repeated multiple times to specify preferred
 /// fallback fonts when the requested codepoint is not available in the primary
@@ -570,7 +570,7 @@ language: ?[:0]const u8 = null,
 /// list is in the `share/ghostty/themes` directory (wherever you installed the
 /// Ghostty "share" directory.
 ///
-/// To see a list of available themes, run `ghostty +list-themes`.
+/// To see a list of available themes, run `gizmo +list-themes`.
 ///
 /// A theme file is simply another Ghostty configuration file. They share
 /// the same syntax and same configuration options. A theme can set any valid
@@ -1153,7 +1153,7 @@ palette: Palette = .{},
 /// created when Ghostty starts, use the `initial-command` configuration.
 ///
 /// Ghostty supports the common `-e` flag for executing a command with
-/// arguments. For example, `ghostty -e fish --with --custom --args`.
+/// arguments. For example, `gizmo -e fish --with --custom --args`.
 /// This flag sets the `initial-command` configuration, see that for more
 /// information.
 command: ?Command = null,
@@ -1167,14 +1167,14 @@ command: ?Command = null,
 /// this at runtime works but will only affect the next terminal surface
 /// if it is the first one ever created.
 ///
-/// If you're using the `ghostty` CLI there is also a shortcut to set this
-/// with arguments directly: you can use the `-e` flag. For example: `ghostty -e
+/// If you're using the `gizmo` CLI there is also a shortcut to set this
+/// with arguments directly: you can use the `-e` flag. For example: `gizmo -e
 /// fish --with --custom --args`. The `-e` flag automatically forces some
 /// other behaviors as well:
 ///
 ///   * Disables shell expansion since the input is expected to already
 ///     be shell-expanded by the upstream (e.g. the shell used to type in
-///     the `ghostty -e` command).
+///     the `gizmo -e` command).
 ///
 ///   * `gtk-single-instance=false` - This ensures that a new instance is
 ///     launched and the CLI args are respected.
@@ -1594,7 +1594,7 @@ class: ?[:0]const u8 = null,
 
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
-/// the documentation or using the `ghostty +list-actions` command.
+/// the documentation or using the `gizmo +list-actions` command.
 ///
 /// Trigger: `+`-separated list of keys and modifiers. Example: `ctrl+a`,
 /// `ctrl+shift+b`, `up`.
@@ -1672,9 +1672,9 @@ class: ?[:0]const u8 = null,
 /// is sometimes called a leader key, a key chord, a key table, etc. There
 /// is no hardcoded limit on the number of parts in a sequence.
 ///
-/// Warning: If you define a sequence as a CLI argument to `ghostty`,
+/// Warning: If you define a sequence as a CLI argument to `gizmo`,
 /// you probably have to quote the keybind since `>` is a special character
-/// in most shells. Example: ghostty --keybind='ctrl+a>n=new_window'
+/// in most shells. Example: gizmo --keybind='ctrl+a>n=new_window'
 ///
 /// A trigger sequence has some special handling:
 ///
@@ -1725,7 +1725,7 @@ class: ?[:0]const u8 = null,
 ///     e.g. `text:\x15` sends Ctrl-U.
 ///
 ///   * All other actions can be found in the documentation or by using the
-///     `ghostty +list-actions` command.
+///     `gizmo +list-actions` command.
 ///
 /// Some notes for the action:
 ///
@@ -2974,7 +2974,7 @@ keybind: Keybinds = .{},
 ///     cache manually using various arguments.
 ///     (Available since: 1.2.0)
 ///
-///   * `path` - Add Ghostty's binary directory to PATH. This ensures the `ghostty`
+///   * `path` - Add the application's binary directory to PATH. This ensures its
 ///     command is available in the shell even if shell init scripts reset PATH.
 ///     This is particularly useful on macOS where PATH is often overridden by
 ///     system scripts. The directory is only added if not already present.
@@ -3770,11 +3770,19 @@ else
 /// Available since: 1.1.0
 @"gtk-opengl-debug": bool = builtin.mode == .debug,
 
+/// Enable authenticated local agent control on Linux GTK. Disabled by default.
+/// Gizmo generates a fresh capability and private runtime discovery record.
+/// This does not execute extensions, workflows, commands, or terminal input.
+/// Set this in the user configuration for persistent opt-in, or pass
+/// `--agent-control=true` to enable only one launch.
+/// Reloading with this set to false revokes the endpoint and its capability.
+@"agent-control": bool = false,
+
 /// If `true`, the Ghostty GTK application will run in single-instance mode:
-/// each new `ghostty` process launched will result in a new window if there is
+/// each new `gizmo` process launched will result in a new window if there is
 /// already a running process.
 ///
-/// If `false`, each new ghostty process will launch a separate application.
+/// If `false`, each new gizmo process will launch a separate application.
 ///
 /// If `detect`, Ghostty will assume true (single instance) unless one of
 /// the following scenarios is found:
@@ -3817,7 +3825,7 @@ else
 @"gtk-tabs-location": GtkTabsLocation = .top,
 
 /// Selects Gizmo's GTK tab presentation: `horizontal` or `vertical`.
-/// The default is `horizontal`. Vertical tabs use a sidebar on the left.
+/// The default is `vertical`, with a compact rail on the left.
 /// Both presentations use the same tabs and terminal surfaces.
 ///
 /// Config reload applies this value to all existing windows and clears
@@ -3829,7 +3837,20 @@ else
 /// `window-show-tab-bar` controls visibility in both orientations.
 /// `gtk-tabs-location` controls only the horizontal presentation.
 /// This setting has no effect on macOS.
-@"gtk-tabs-orientation": GtkTabsOrientation = .horizontal,
+@"gtk-tabs-orientation": GtkTabsOrientation = .vertical,
+
+/// Initial GTK sidebar state: `compact`, `expanded`, or `hidden`.
+/// Compact reserves a 48px rail. Expanded overlays the terminal at 240px,
+/// without changing the terminal allocation relative to compact.
+/// The sidebar never expands on hover. The default is `compact`.
+///
+/// `win.set-sidebar-state` accepts these values. `win.toggle-sidebar`
+/// switches compact and expanded; `win.focus-tab-list` focuses the list.
+/// Actions affect only the current window and do not write configuration.
+/// Explicit config updates reset both sidebar and orientation overrides.
+/// Soft theme changes preserve overrides. `window-show-tab-bar = never`
+/// always hides the sidebar. This setting has no effect on macOS.
+@"gtk-sidebar-state": GtkSidebarState = .compact,
 
 /// If true, the close button of each tab is shown at the start of the tab
 /// (the left, in left-to-right languages) and the tab's icon at the end.
@@ -3891,7 +3912,7 @@ else
 ///   * https://docs.gtk.org/gtk4/css-properties.html - A comprehensive list
 ///     of supported CSS properties.
 ///
-/// Launch Ghostty with `env GTK_DEBUG=interactive ghostty` to tweak Ghostty's
+/// Launch Gizmo with `env GTK_DEBUG=interactive gizmo` to tweak Ghostty's
 /// CSS in real time using the GTK Inspector. Errors in your CSS files would
 /// also be reported in the terminal you started Ghostty from. See
 /// https://developer.gnome.org/documentation/tools/inspector.html for more
@@ -4145,6 +4166,14 @@ fn loadFsFile(self: *Config, alloc: Allocator, file: *std.Io.File, path: []const
     var file_reader = file.reader(global.io(), &buf);
     const reader = &file_reader.interface;
     try self.loadReader(alloc, reader, path);
+}
+
+/// Load saved configuration text as though it came from the absolute path.
+/// This preserves relative include/path resolution without a temporary file.
+pub fn loadString(self: *Config, alloc: Allocator, text: []const u8, path: []const u8) !void {
+    assert(std.fs.path.isAbsolute(path));
+    var reader: std.Io.Reader = .fixed(text);
+    try self.loadReader(alloc, &reader, path);
 }
 
 /// Load config from the given Reader.
@@ -9365,6 +9394,13 @@ pub const GtkTabsLocation = enum {
 pub const GtkTabsOrientation = enum {
     horizontal,
     vertical,
+};
+
+/// See gtk-sidebar-state.
+pub const GtkSidebarState = enum {
+    compact,
+    expanded,
+    hidden,
 };
 
 /// See gtk-toolbar-style

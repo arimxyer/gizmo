@@ -24,8 +24,8 @@ BEGIN
         //VALUE "FileDescription",    "???"
         //VALUE "FileVersion",        VERSION
         //VALUE "LegalCopyright",     "(C) 2024 ???"
-        VALUE "OriginalFilename", "ghostty.exe"
-        VALUE "ProductName",        "Ghostty"
+        VALUE "OriginalFilename", "gizmo.exe"
+        VALUE "ProductName",        "Gizmo"
         //VALUE "ProductVersion",     VERSION
         END
     END

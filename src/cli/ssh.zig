@@ -13,7 +13,7 @@ const global = @import("../global.zig");
 const log = std.log.scoped(.ssh);
 
 const usage =
-    \\Usage: ghostty +ssh [flags] [--] <ssh args...>
+    \\Usage: gizmo +ssh [flags] [--] <ssh args...>
     \\
     \\Flags:
     \\  --forward-env[=bool]  Send Ghostty env vars to the remote. Default: true.
@@ -115,10 +115,10 @@ pub const Options = struct {
 /// `shell-integration-features` includes `ssh-env` or `ssh-terminfo`,
 /// each shell defines an `ssh` function that runs:
 ///
-///     ghostty +ssh <flags> -- "$@"
+///     gizmo +ssh <flags> -- "$@"
 ///
-/// You can also run `ghostty +ssh` directly, or alias it yourself (e.g.
-/// `alias ssh='ghostty +ssh --'`) if you prefer not to use the shell
+/// You can also run `gizmo +ssh` directly, or alias it yourself (e.g.
+/// `alias ssh='gizmo +ssh --'`) if you prefer not to use the shell
 /// integration.
 ///
 /// Before it starts `ssh`, `+ssh` can do two pieces of setup. Both are
@@ -136,7 +136,7 @@ pub const Options = struct {
 ///      connect to a host, `+ssh` copies Ghostty's terminfo entry to it and
 ///      compiles it with `tic`. This teaches programs on the remote host
 ///      how to use the `xterm-ghostty` terminal type. Successful installs
-///      are cached (see `ghostty +ssh-cache`), so later connections to the
+///      are cached (see `gizmo +ssh-cache`), so later connections to the
 ///      same host skip this step.
 ///
 /// SSH authentication messages remain visible during setup, including
@@ -178,7 +178,7 @@ pub const Options = struct {
 ///     When `false`, both the cache read (skip-if-installed) and the
 ///     cache write (record-on-success) are bypassed, and every
 ///     connection performs the install. To one-shot reinstall a single
-///     host while keeping the cache in use, prefer `ghostty +ssh-cache
+///     host while keeping the cache in use, prefer `gizmo +ssh-cache
 ///     --remove=<host>` followed by a normal connection.
 ///
 ///   * `--ssh=<path>`: Path to the `ssh` binary to execute. Default: the
@@ -190,14 +190,14 @@ pub const Options = struct {
 /// Examples:
 ///
 ///     # Basic invocation using defaults:
-///     ghostty +ssh user@example.com
+///     gizmo +ssh user@example.com
 ///
 ///     # Forward Ghostty env vars but skip the terminfo install.
 ///     # The remote session uses TERM=xterm-256color:
-///     ghostty +ssh --terminfo=false user@example.com
+///     gizmo +ssh --terminfo=false user@example.com
 ///
 ///     # Install terminfo but don't send any extra env vars:
-///     ghostty +ssh --forward-env=false user@example.com
+///     gizmo +ssh --forward-env=false user@example.com
 ///
 ///     # SetEnv lines in your ssh config still apply. With this entry in
 ///     # ~/.ssh/config:
@@ -206,16 +206,16 @@ pub const Options = struct {
 ///     #       SetEnv EDITOR=vim
 ///     #
 ///     # ssh still sends EDITOR=vim, along with the TERM chosen by +ssh:
-///     ghostty +ssh dev
+///     gizmo +ssh dev
 ///
 ///     # `ssh` flags (short-form `-p`, etc.) pass through unchanged:
-///     ghostty +ssh -p 2222 -i ~/.ssh/id_ed25519 user@example.com
+///     gizmo +ssh -p 2222 -i ~/.ssh/id_ed25519 user@example.com
 ///
 ///     # Use `--` explicitly if your ssh args might collide with our flags:
-///     ghostty +ssh -- --some-rare-ssh-arg user@example.com
+///     gizmo +ssh -- --some-rare-ssh-arg user@example.com
 ///
 /// Pass `--verbose` to see what `+ssh` is doing. For cache inspection
-/// and management, see `ghostty +ssh-cache`.
+/// and management, see `gizmo +ssh-cache`.
 ///
 /// Available since: 1.4.0
 pub fn run(alloc_gpa: Allocator) !u8 {

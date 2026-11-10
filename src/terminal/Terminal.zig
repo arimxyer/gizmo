@@ -73,6 +73,9 @@ pwd: std.ArrayList(u8),
 /// The title of the terminal as set by escape sequences (e.g. OSC 0/2).
 title: std.ArrayList(u8),
 
+/// OSC 7501 records for this PTY. Access uses the same lock as terminal state.
+program_status: @import("ProgramStatus.zig") = .{},
+
 /// The color state for this terminal.
 colors: Colors,
 
@@ -398,6 +401,7 @@ pub fn deinit(self: *Terminal, alloc: Allocator) void {
     self.colors.palette.deinit(alloc);
     self.pwd.deinit(alloc);
     self.title.deinit(alloc);
+    self.program_status.deinit(alloc);
     self.glyph_glossary.deinit(alloc);
     if (self.kitty_dnd) |dnd| dnd.destroy(alloc);
     self.* = undefined;
@@ -2789,6 +2793,7 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
+            _ = self.program_status.endCommand(self.gpa());
             // "First do a fresh-line."
             try self.semanticPromptFreshLine();
 
@@ -5892,6 +5897,7 @@ pub fn fullReset(self: *Terminal) void {
     self.previous_char = null;
     self.pwd.clearRetainingCapacity();
     self.title.clearRetainingCapacity();
+    _ = self.program_status.clear(self.gpa(), "");
     self.glyph_glossary.clearAndFree(self.gpa());
     // A reset only interrupts an in-progress chunked OSC 72 command;
     // drag and drop registration survives, matching kitty.
@@ -19569,4 +19575,36 @@ test "Terminal: eraseDisplay complete at input prompt copied from alt screen scr
     t.eraseDisplay(.complete, false);
 
     try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+test "OSC 7501 prompt boundary and reset lifecycle" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(alloc);
+    inline for (.{ .working, .blocked, .done, .@"error" }) |state| {
+        _ = try t.program_status.apply(alloc, .{
+            .state = state,
+            .data = "id=" ++ @tagName(state),
+        });
+    }
+
+    // DECSTR changes terminal modes, not the program's records.
+    t.softReset();
+    try testing.expectEqual(@as(usize, 4), t.program_status.records.items.len);
+    // OSC 133 P is not a command boundary; OSC 133 A is.
+    try t.semanticPrompt(.init(.prompt_start));
+    try testing.expectEqual(@as(usize, 4), t.program_status.records.items.len);
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expectEqual(@as(usize, 2), t.program_status.records.items.len);
+    var done = (try t.program_status.details(alloc, "done")).?;
+    defer done.deinit(alloc);
+    var failed = (try t.program_status.details(alloc, "error")).?;
+    defer failed.deinit(alloc);
+    try testing.expectEqual(osc.program_status.State.done, done.state);
+    try testing.expectEqual(osc.program_status.State.@"error", failed.state);
+
+    // RIS clears even completed results. Caller-owned details remain valid.
+    t.fullReset();
+    try testing.expectEqual(@as(usize, 0), t.program_status.records.items.len);
+    try testing.expectEqualStrings("done", done.id);
 }

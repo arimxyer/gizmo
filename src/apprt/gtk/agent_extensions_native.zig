@@ -7,9 +7,10 @@ pub const Bytes = opaque {};
 pub const Error = extern struct { domain: c_uint, code: c_int, message: [*:0]const u8 };
 pub const Ready = *const fn (?*Object, *AsyncResult, ?*anyopaque) callconv(.c) void;
 
-pub extern "c" fn gtk_application_window_new(*Object) *Widget;
+pub extern "c" fn gtk_window_new() *Widget;
 pub extern "c" fn gtk_application_get_active_window(*Object) ?*Widget;
 pub extern "c" fn gtk_window_set_transient_for(*Widget, ?*Widget) void;
+pub extern "c" fn gtk_window_set_application(*Widget, ?*Object) void;
 pub extern "c" fn gtk_window_set_title(*Widget, [*:0]const u8) void;
 pub extern "c" fn gtk_window_set_default_size(*Widget, c_int, c_int) void;
 pub extern "c" fn gtk_window_set_hide_on_close(*Widget, c_int) void;

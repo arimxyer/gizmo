@@ -7,23 +7,21 @@ const help_strings = @import("help_strings");
 
 /// A fish completions configuration that contains all the available commands
 /// and options.
-pub const completions = comptimeGenerateCompletions();
-
-fn comptimeGenerateCompletions() []const u8 {
+pub fn completions(comptime command: []const u8) []const u8 {
     comptime {
-        @setEvalBranchQuota(50000);
+        @setEvalBranchQuota(100000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
-        try writeCompletions(&counter.writer);
+        try writeCompletions(&counter.writer, command);
 
         var buf: [counter.count]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        try writeCompletions(&writer);
+        try writeCompletions(&writer, command);
         const final = buf;
         return final[0..writer.end];
     }
 }
 
-fn writeCompletions(writer: *std.Io.Writer) !void {
+fn writeCompletions(writer: *std.Io.Writer, comptime command: []const u8) !void {
     {
         try writer.writeAll("set -l commands \"");
         var count: usize = 0;
@@ -36,21 +34,21 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll("\"\n");
     }
 
-    try writer.writeAll("complete -c ghostty -f\n");
+    try writer.writeAll("complete -c " ++ command ++ " -f\n");
 
-    try writer.writeAll("complete -c ghostty -s e -l help -f\n");
-    try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
+    try writer.writeAll("complete -c " ++ command ++ " -s e -l help -f\n");
+    try writer.writeAll("complete -c " ++ command ++ " -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
 
     inline for (@typeInfo(Config).@"struct".field_names, @typeInfo(Config).@"struct".field_types) |field, field_type| {
         if (field[0] == '_') continue;
 
-        try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l ");
+        try writer.writeAll("complete -c " ++ command ++ " -n \"not __fish_seen_subcommand_from $commands\" -l ");
         try writer.writeAll(field);
         try writer.writeAll(if (field_type != bool) " -r" else " ");
         if (std.mem.startsWith(u8, field, "font-family"))
-            try writer.writeAll(" -f  -a \"(ghostty +list-fonts | grep '^[A-Z]')\"")
+            try writer.writeAll(" -f  -a \"(" ++ command ++ " +list-fonts | grep '^[A-Z]')\"")
         else if (std.mem.eql(u8, "theme", field))
-            try writer.writeAll(" -f -a \"(ghostty +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
+            try writer.writeAll(" -f -a \"(" ++ command ++ " +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
         else if (std.mem.eql(u8, "working-directory", field))
             try writer.writeAll(" -f -k -a \"(__fish_complete_directories)\"")
         else {
@@ -93,7 +91,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     }
 
     {
-        try writer.writeAll("complete -c ghostty -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
+        try writer.writeAll("complete -c " ++ command ++ " -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
         var count: usize = 0;
         for (@typeInfo(Action).@"enum".field_names) |field| {
             if (count > 0) try writer.writeAll(" ");
@@ -111,7 +109,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         const options = @field(Action, field).options();
         inline for (@typeInfo(options).@"struct".field_names, @typeInfo(options).@"struct".field_types) |opt, opt_type| {
             if (opt[0] == '_') continue;
-            try writer.writeAll("complete -c ghostty -n \"__fish_seen_subcommand_from +" ++ field ++ "\" -l ");
+            try writer.writeAll("complete -c " ++ command ++ " -n \"__fish_seen_subcommand_from +" ++ field ++ "\" -l ");
             try writer.writeAll(opt);
             try writer.writeAll(if (opt_type != bool) " -r" else "");
 

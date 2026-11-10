@@ -140,6 +140,10 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// OSC 7501 records changed. Payload-free: readers snapshot under the
+    /// renderer/IO mutex instead of crossing threads with parser slices.
+    program_status_changed,
+
     /// A command has started in the shell, start a timer.
     start_command,
 

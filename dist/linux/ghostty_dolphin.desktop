@@ -5,6 +5,6 @@ MimeType=inode/directory
 Actions=RunGhosttyDir
 
 [Desktop Action RunGhosttyDir]
-Name=Open Ghostty Here
+Name=Open Gizmo Here
 Icon=com.mitchellh.ghostty
-Exec=ghostty +new-window --working-directory=%F
+Exec=gizmo +new-window --working-directory=%F

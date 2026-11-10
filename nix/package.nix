@@ -93,7 +93,7 @@ in
       "-Dcpu=baseline"
       "-Doptimize=${optimize}"
       "-Dstrip=${lib.boolToString strip}"
-      "-Dinstalled-exe-path=${placeholder "out"}/bin/ghostty"
+      "-Dinstalled-exe-path=${placeholder "out"}/bin/gizmo"
     ];
 
     outputs = [
@@ -179,6 +179,6 @@ in
         "x86_64-linux"
         "aarch64-linux"
       ];
-      mainProgram = "ghostty";
+      mainProgram = "gizmo";
     };
   })

@@ -15,6 +15,7 @@ const Window = @import("class/window.zig").Window;
 const Tab = @import("class/tab.zig").Tab;
 const ext = @import("ext.zig");
 const extensions = @import("agent_extensions.zig");
+const discovery = @import("../../agent_discovery.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 const Self = @This();
@@ -30,8 +31,11 @@ connection: *gio.DBusConnection,
 registration: c_uint,
 node: *anyopaque,
 token: []const u8,
+discovery_dir: ?std.Io.Dir = null,
+discovery_name: ?[:0]const u8 = null,
 next_id: usize = 1,
 config_job: ?*ConfigJob = null,
+launch_json: ?[]const u8 = null,
 
 // These declarations use the public GIO C ABI. Keeping the vtable here avoids
 // depending on generated callback wrappers, which vary with zig-gobject.
@@ -40,6 +44,7 @@ const VTable = extern struct { method_call: ?Method, get_property: ?*const anyop
 extern "c" fn g_dbus_node_info_new_for_xml([*:0]const u8, *?*glib.Error) ?*anyopaque;
 extern "c" fn g_dbus_node_info_lookup_interface(*anyopaque, [*:0]const u8) ?*anyopaque;
 extern "c" fn g_dbus_node_info_unref(*anyopaque) void;
+extern "c" fn g_dbus_connection_flush_sync(*gio.DBusConnection, ?*anyopaque, ?*?*glib.Error) c_int;
 extern "c" fn g_dbus_connection_register_object(*gio.DBusConnection, [*:0]const u8, *anyopaque, *const VTable, ?*anyopaque, ?*const fn (?*anyopaque) callconv(.c) void, *?*glib.Error) c_uint;
 extern "c" fn g_object_get_data(*anyopaque, [*:0]const u8) ?*anyopaque;
 extern "c" fn g_object_set_data(*anyopaque, [*:0]const u8, ?*anyopaque) void;
@@ -47,27 +52,64 @@ extern "c" fn g_type_name_from_instance(*anyopaque) [*:0]const u8;
 extern "c" fn gtk_widget_activate_action_variant(*gtk.Widget, [*:0]const u8, ?*glib.Variant) c_int;
 const vtable: VTable = .{ .method_call = onRequest };
 
-pub fn init(app: *Application) !?*Self {
-    const token = global.environ().getPosix("GIZMO_AGENT_TOKEN") orelse return null;
-    // Setting a nonempty, sufficiently long secret is the explicit opt-in.
-    if (token.len < 32 or token.len > 4096) return error.AgentTokenMustHaveAtLeast32Bytes;
+pub fn init(app: *Application, allow_environment: bool) !?*Self {
+    const config = app.getConfig();
+    defer config.unref();
+    const environment: ?[]const u8 = if (allow_environment) global.environ().getPosix("GIZMO_AGENT_TOKEN") else null;
+    if (!config.get().@"agent-control" and !allow_environment) return null;
     const connection = app.as(gio.Application).getDbusConnection() orelse return error.SessionBusUnavailable;
     const alloc = app.allocator();
     const self = try alloc.create(Self);
     errdefer alloc.destroy(self);
+    var generated: [64]u8 = undefined;
+    if (environment == null) generated = try discovery.randomHex(32);
+    defer @memset(&generated, 0);
+    const token = environment orelse &generated;
+    if (token.len < 32 or token.len > 4096) return error.AgentTokenMustHaveAtLeast32Bytes;
     const secret = try alloc.dupe(u8, token);
-    errdefer alloc.free(secret);
+    errdefer {
+        @memset(secret, 0);
+        alloc.free(secret);
+    }
     var gerr: ?*glib.Error = null;
     defer if (gerr) |e| e.free();
     const node = g_dbus_node_info_new_for_xml(xml, &gerr) orelse return error.AgentIntrospectionFailed;
     errdefer g_dbus_node_info_unref(node);
     self.* = .{ .app = app, .connection = connection, .registration = 0, .node = node, .token = secret };
+    self.launch_json = launch: {
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const metadata = @import("../../cli/lifecycle.zig").launchMetadata(arena.allocator()) catch break :launch null;
+        break :launch try std.json.Stringify.valueAlloc(alloc, metadata, .{});
+    };
+    errdefer if (self.launch_json) |json| alloc.free(json);
     self.registration = g_dbus_connection_register_object(connection, object_path, g_dbus_node_info_lookup_interface(node, interface).?, &vtable, self, null, &gerr);
     if (self.registration == 0) return error.AgentRegistrationFailed;
+    errdefer _ = connection.unregisterObject(self.registration);
+    const dir = try discovery.openDirectory(alloc, true);
+    errdefer dir.close(global.io());
+    const instance = try discovery.randomHex(16);
+    const name = try discovery.publish(alloc, dir, .{
+        .instance = &instance,
+        .pid = @intCast(std.posix.system.getpid()),
+        .bus_name = std.mem.span(connection.getUniqueName() orelse return error.SessionBusUnavailable),
+        .app_class = std.mem.span(app.as(gio.Application).getApplicationId() orelse ""),
+        .token = secret,
+        .created_unix = std.Io.Timestamp.now(global.io(), .real).toSeconds(),
+    });
+    self.discovery_dir = dir;
+    self.discovery_name = name;
     return self;
 }
 
 pub fn deinit(self: *Self) void {
+    if (self.discovery_dir) |dir| {
+        if (self.discovery_name) |name| {
+            discovery.remove(dir, name);
+            self.app.allocator().free(name);
+        }
+        dir.close(global.io());
+    }
     _ = self.connection.unregisterObject(self.registration);
     if (self.config_job) |job| {
         job.thread.?.join();
@@ -78,6 +120,7 @@ pub fn deinit(self: *Self) void {
     }
     g_dbus_node_info_unref(self.node);
     const alloc = self.app.allocator();
+    if (self.launch_json) |json| alloc.free(json);
     @memset(@constCast(self.token), 0);
     alloc.free(self.token);
     alloc.destroy(self);
@@ -85,6 +128,7 @@ pub fn deinit(self: *Self) void {
 
 fn onRequest(_: *gio.DBusConnection, _: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, args: *glib.Variant, invocation: *gio.DBusMethodInvocation, userdata: ?*anyopaque) callconv(.c) void {
     const self: *Self = @ptrCast(@alignCast(userdata.?));
+    if (self.app.agentControl() != self) return replyError(invocation, "AgentControlDisabled");
     const arg = args.getChildValue(0);
     defer arg.unref();
     var len: usize = 0;
@@ -105,6 +149,14 @@ fn onRequest(_: *gio.DBusConnection, _: [*:0]const u8, _: [*:0]const u8, _: [*:0
     const method = string(root, "method") catch return replyError(invocation, "MethodRequired");
     const params = root.object.get("params") orelse Value{ .object = .empty };
     if (params != .object) return replyError(invocation, "ExpectedParamsObject");
+    if (std.mem.eql(u8, method, "lifecycle.stop")) {
+        // Reply before quitting: quit may immediately dispose this request owner.
+        invocation.returnValue(glib.Variant.new("(s)", @as([*:0]const u8, "{\"ok\":true,\"result\":{\"stop_requested\":true}}")));
+        _ = g_dbus_connection_flush_sync(self.connection, null, null);
+        _ = self.app.ref();
+        _ = glib.idleAdd(stopApplication, self.app);
+        return;
+    }
     if (std.mem.eql(u8, method, "config.set") or std.mem.eql(u8, method, "config.reset") or std.mem.eql(u8, method, "config.reload")) {
         ConfigJob.start(self, invocation, method, params) catch |err| replyError(invocation, @errorName(err));
         return;
@@ -114,6 +166,13 @@ fn onRequest(_: *gio.DBusConnection, _: [*:0]const u8, _: [*:0]const u8, _: [*:0
     const envelope = alloc.printSentinel("{{\"ok\":true,\"result\":{s}}}", .{result}, 0) catch return replyError(invocation, "OutOfMemory");
     if (envelope.len > max_response) return replyError(invocation, "ResponseTooLarge");
     invocation.returnValue(glib.Variant.new("(s)", envelope.ptr));
+}
+
+fn stopApplication(data: ?*anyopaque) callconv(.c) c_int {
+    const app: *Application = @ptrCast(@alignCast(data.?));
+    defer app.unref();
+    app.quit();
+    return 0;
 }
 
 fn replyError(invocation: *gio.DBusMethodInvocation, message: [:0]const u8) void {
@@ -163,7 +222,10 @@ pub fn performBinding(app: *Application, alloc: Allocator, params: Value) !bool 
 fn request(self: *Self, alloc: Allocator, root: Value, method: []const u8, params: Value) ![]const u8 {
     if (std.mem.startsWith(u8, method, "extensions.")) return extensions.request(self.app, alloc, root);
     if (std.mem.eql(u8, method, "discover")) return self.discover(alloc);
+    if (std.mem.eql(u8, method, "lifecycle.launch")) return self.launch_json orelse error.LaunchMetadataUnavailable;
     if (std.mem.eql(u8, method, "tree")) return self.tree(alloc);
+    if (std.mem.eql(u8, method, "status.list")) return self.status(alloc, params, false);
+    if (std.mem.eql(u8, method, "status.get")) return self.status(alloc, params, true);
     if (std.mem.eql(u8, method, "screen.read")) return self.screen(alloc, params);
     if (std.mem.eql(u8, method, "ui.tree")) return self.uiTree(alloc);
     if (std.mem.eql(u8, method, "ui.action")) {
@@ -281,12 +343,29 @@ fn request(self: *Self, alloc: Allocator, root: Value, method: []const u8, param
         group.activateAction(name, parameter);
         return encode(alloc, .{ .activated = true });
     }
+    if (std.mem.eql(u8, method, "config.validate")) {
+        const config = self.app.getConfig();
+        defer config.unref();
+        if (config.get()._diagnostics.items().len != 0) return error.InvalidConfiguration;
+        return encode(alloc, .{ .valid = true, .scope = "application" });
+    }
     if (std.mem.eql(u8, method, "config.get")) {
         const config = self.app.getConfig();
         defer config.unref();
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
-        try (configpkg.FileFormatter{ .alloc = alloc, .config = config.get(), .docs = try boolean(params, "docs", false) }).format(&out.writer);
+        if (params.object.get("key")) |_| {
+            const key = try string(params, "key");
+            var found = false;
+            inline for (@typeInfo(configpkg.Config).@"struct".field_names, @typeInfo(configpkg.Config).@"struct".field_types) |name, T| {
+                if (comptime name[0] == '_') continue;
+                if (std.mem.eql(u8, key, name)) {
+                    try configpkg.formatEntry(T, name, @field(config.get(), name), &out.writer);
+                    found = true;
+                }
+            }
+            if (!found) return error.UnknownConfigKey;
+        } else try (configpkg.FileFormatter{ .alloc = alloc, .config = config.get(), .docs = try boolean(params, "docs", false) }).format(&out.writer);
         return encode(alloc, .{ .format = "ghostty-config", .text = out.written(), .scope = "application", .persistence = "session changes require explicit persist_path" });
     }
     return error.UnknownMethod;
@@ -372,7 +451,9 @@ fn treeNode(self: *Self, alloc: Allocator, writer: *std.Io.Writer, t: *Surface.T
                 .ready = false,
                 .title = surface.getEffectiveTitle(),
             }));
-            try writer.print("{{\"surface\":\"{d}\",\"widget\":\"u{d}\",\"ready\":true,\"title\":{s},\"focused\":{},\"width_px\":{d},\"height_px\":{d},\"cell_width_px\":{d},\"cell_height_px\":{d}}}", .{ core.id, self.id(surface), try encode(alloc, surface.getEffectiveTitle()), core.focused, core.size.screen.width, core.size.screen.height, core.size.cell.width, core.size.cell.height });
+            var summary = try core.programStatusSummary(alloc);
+            defer if (summary) |*record| record.deinit(alloc);
+            try writer.print("{{\"surface\":\"{d}\",\"widget\":\"u{d}\",\"ready\":true,\"title\":{s},\"focused\":{},\"width_px\":{d},\"height_px\":{d},\"cell_width_px\":{d},\"cell_height_px\":{d},\"program_status\":{s}}}", .{ core.id, self.id(surface), try encode(alloc, surface.getEffectiveTitle()), core.focused, core.size.screen.width, core.size.screen.height, core.size.cell.width, core.size.cell.height, try encode(alloc, summary) });
         },
         .split => |split| {
             try writer.print("{{\"direction\":{s},\"ratio\":{d},\"children\":[", .{ try encode(alloc, @tagName(split.layout)), split.ratio });
@@ -382,6 +463,18 @@ fn treeNode(self: *Self, alloc: Allocator, writer: *std.Io.Writer, t: *Surface.T
             try writer.writeAll("]}");
         },
     }
+}
+
+fn status(self: *Self, alloc: Allocator, params: Value, details: bool) ![]const u8 {
+    const surface = try findSurface(self.app, params);
+    if (details) {
+        var record = try surface.programStatusDetails(alloc, try string(params, "id"));
+        defer if (record) |*r| r.deinit(alloc);
+        return encode(alloc, record);
+    }
+    var snapshot = try surface.programStatusSnapshot(alloc);
+    defer snapshot.deinit(alloc);
+    return encode(alloc, snapshot);
 }
 
 fn screen(self: *Self, alloc: Allocator, params: Value) ![]const u8 {
@@ -474,7 +567,11 @@ fn discover(self: *Self, alloc: Allocator) ![]const u8 {
     try out.writer.writeAll("\"protocol\":1,\"name\":\"Gizmo\",\"interface\":\"org.gizmo.Agent1\",\"path\":\"/org/gizmo/Agent1\",\"request_limit\":1048576,\"response_limit\":16777216,\"surface_ids\":\"decimal strings; stable for the surface lifetime\",\"methods\":[");
     const methods = .{
         .{ "discover", "{}", "Method, action, key and config schemas" },
+        .{ "lifecycle.launch", "{}", "Original executable, argv and startup working directory; authenticated restart metadata, not session restoration" },
+        .{ "lifecycle.stop", "{}", "Request normal application quit; native close confirmation remains active" },
         .{ "tree", "{}", "All windows, tabs and recursive splits" },
+        .{ "status.list", "{surface:string}", "OSC 7501 status records, sorted by id; empty records when no program reports status" },
+        .{ "status.get", "{surface:string,id:string}", "One OSC 7501 status record or null" },
         .{ "ui.tree", "{}", "GTK widgets including dialogs and extension panels; bounded depth and node count" },
         .{ "ui.action", "{widget:string,operation:activate|focus|text,text?:string}", "Invoke a widget exposed by ui.tree; text requires an editable widget" },
         .{ "screen.read", "{surface:string,region?:viewport|active|history|screen}", "Plain text plus grid, cursor and graphics metadata; 4 MiB text maximum" },
@@ -486,10 +583,11 @@ fn discover(self: *Self, alloc: Allocator) ![]const u8 {
         .{ "input.scroll", "{surface:string,x:number,y:number,delta_x:number,delta_y:number,precision?:bool,shift?:bool,ctrl?:bool,alt?:bool,super?:bool}", "Core cursor/scroll callbacks at x/y device pixels, as input.mouse. Deltas are wheel ticks by default, device pixels if precision=true. Positive delta_x moves right; positive delta_y moves up. Core applies configured scroll multipliers and cell accumulation; no GTK CSS scaling, sign inversion or touchpad 10x factor. Maximum 10000 resulting cells per axis per call; errors propagate." },
         .{ "gtk.actions", "{}", "Available application GTK actions and GVariant parameter types" },
         .{ "gtk.action", "{name:string,parameter?:string,surface?:string,widget?:string}", "Activate app action or surface/widget action such as win.set-tabs-orientation with GVariant text parameter" },
-        .{ "config.get", "{docs?:bool}", "Effective application config in canonical parser format" },
-        .{ "config.set", "{text:string,persist_path?:absolute-string}", "Parse config lines onto current config; validate then update all surfaces; optional atomic explicit file replacement" },
+        .{ "config.get", "{docs?:bool,key?:string}", "Effective application config in canonical parser format; optional one-key filter" },
+        .{ "config.set", "{text:string,persist_path?:absolute-string,revoke_agent_control?:bool}", "Parse config lines onto current config; validate then update all surfaces; optional atomic explicit file replacement. revoke_agent_control=true requires agent-control=false and also revokes startup environment opt-in after applying." },
         .{ "config.reset", "{persist_path?:absolute-string}", "Reset to defaults through existing config update path" },
         .{ "config.reload", "{}", "Reload files and launch arguments; discards session config edits" },
+        .{ "config.validate", "{}", "Validate the current application configuration; does not read or change saved files" },
         .{ "extensions.*", "see extensions.discover", "Custom panels, tools and explicit-invocation workflows" },
     };
     inline for (methods, 0..) |method, n| {
@@ -669,6 +767,7 @@ const ConfigJob = struct {
     path: ?[:0]const u8,
     config: ?configpkg.Config,
     failure: ?anyerror = null,
+    revoke_agent_control: bool,
 
     fn start(owner: *Self, invocation: *gio.DBusMethodInvocation, method: []const u8, params: Value) !void {
         if (owner.config_job != null) return error.ConfigurationBusy;
@@ -680,6 +779,8 @@ const ConfigJob = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
         const text = if (std.mem.eql(u8, method, "config.set")) try a.dupe(u8, try string(params, "text")) else "";
+        const revoke_agent_control = std.mem.eql(u8, method, "config.set") and
+            try boolean(params, "revoke_agent_control", false);
         const path: ?[:0]const u8 = if (params.object.get("persist_path")) |_| try cString(a, try string(params, "persist_path")) else null;
         if (path) |p| if (!std.fs.path.isAbsolute(p)) return error.PersistenceRequiresAbsolutePath;
         // Finish arena allocations before copying its ownership into job.
@@ -689,7 +790,7 @@ const ConfigJob = struct {
         var config = if (std.mem.eql(u8, method, "config.set")) try current.get().clone(alloc) else null;
         errdefer if (config) |*c| c.deinit();
         invocation.ref();
-        job.* = .{ .owner = owner, .app = app, .invocation = invocation, .arena = arena, .method = method_copy, .text = text, .path = path, .config = config };
+        job.* = .{ .owner = owner, .app = app, .invocation = invocation, .arena = arena, .method = method_copy, .text = text, .path = path, .config = config, .revoke_agent_control = revoke_agent_control };
         errdefer invocation.unref();
         job.thread = try std.Thread.spawn(.{}, work, .{job});
         owner.config_job = job;
@@ -717,6 +818,7 @@ const ConfigJob = struct {
             try self.config.?.finalize();
         }
         if (self.config.?._diagnostics.items().len > baseline_diagnostics) return error.InvalidConfiguration;
+        if (self.revoke_agent_control and self.config.?.@"agent-control") return error.AgentControlMustBeDisabled;
         if (self.path) |path| {
             var out: std.Io.Writer.Allocating = .init(alloc);
             defer out.deinit();
@@ -741,6 +843,7 @@ const ConfigJob = struct {
             replyError(self.invocation, @errorName(err));
             return 0;
         };
+        if (self.revoke_agent_control) self.app.revokeAgentControl();
         resetTabsOrientations(self.app);
         self.invocation.returnValue(glib.Variant.new("(s)", @as([*:0]const u8, "{\"ok\":true,\"result\":{\"applied\":true}}")));
         return 0;

@@ -53,6 +53,7 @@ const AgentExtensions = @import("../agent_extensions.zig");
 const log = std.log.scoped(.gtk_ghostty_application);
 
 extern "c" fn setenv(name: ?[*]const u8, value: ?[*]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 /// Function used to funnel GLib/GObject/GTK log messages into Zig's logging
 /// system rather than just getting dumped directly to stderr.
@@ -243,6 +244,13 @@ pub const Application = extern struct {
 
         agent_control: ?*AgentControl = null,
 
+        /// Startup environment opt-in survives unrelated config notifications.
+        /// A config true-to-false transition or explicit revoke clears it.
+        agent_control_environment: bool = false,
+        agent_control_config: bool = false,
+        agent_control_revoke_source: ?c_uint = null,
+        agent_control_disposed: bool = false,
+
         pub var offset: c_int = 0;
     };
 
@@ -270,6 +278,14 @@ pub const Application = extern struct {
         core_app: *CoreApp,
     ) (error{ GtkMinimumVersion, AdwaitaMinimumVersion } || Allocator.Error)!*Self {
         const alloc = core_app.alloc;
+        // Consume the private launch marker before terminal children inherit it.
+        const controlled_start = controlled: {
+            const value = global.environ().getPosix("GIZMO_CONTROLLED_START") orelse break :controlled false;
+            const enabled = std.mem.eql(u8, value, "1");
+            _ = unsetenv("GIZMO_CONTROLLED_START");
+            global.syncEnviron();
+            break :controlled enabled;
+        };
 
         // Capture GLib/GObject/GTK log messages and funnel them through Zig's
         // logging system rather than just getting dumped directly to stderr.
@@ -295,6 +311,7 @@ pub const Application = extern struct {
             break :err def;
         };
         defer config.deinit();
+        if (controlled_start) config.@"gtk-single-instance" = .false;
 
         // Set the old language,
         const saved_language: ?[:0]const u8 = saved_language: {
@@ -423,6 +440,8 @@ pub const Application = extern struct {
             .rt_app = rt_app,
             .core_app = core_app,
             .config = config_obj,
+            .agent_control_environment = controlled_start or global.environ().getPosix("GIZMO_AGENT_TOKEN") != null,
+            .agent_control_config = config_obj.get().@"agent-control",
             .winproto = wp,
             .css_provider = css_provider,
             .custom_css_providers = .empty,
@@ -462,11 +481,7 @@ pub const Application = extern struct {
     pub fn deinit(self: *Self) void {
         const alloc = self.allocator();
         const priv: *Private = self.private();
-        if (priv.agent_control) |control| {
-            control.deinit();
-            priv.agent_control = null;
-        }
-        AgentExtensions.deinit(self);
+        self.disposeAgentControl();
         priv.config.unref();
         priv.winproto.deinit();
         priv.open_uri.deinit();
@@ -855,7 +870,78 @@ pub const Application = extern struct {
     }
 
     pub fn agentControl(self: *Self) ?*AgentControl {
-        return self.private().agent_control;
+        const priv = self.private();
+        if (priv.agent_control_revoke_source != null or priv.agent_control_disposed) return null;
+        return priv.agent_control;
+    }
+
+    /// Explicit revocation also cancels the startup environment opt-in.
+    /// The caller must first apply agent-control=false.
+    pub fn revokeAgentControl(self: *Self) void {
+        self.private().agent_control_environment = false;
+        self.syncAgentControl();
+    }
+
+    /// Keep startup opt-in until an explicit disable, not an unrelated reload.
+    fn syncAgentControl(self: *Self) void {
+        const priv = self.private();
+        if (priv.agent_control_disposed) return;
+        const config_enabled = priv.config.get().@"agent-control";
+        if (priv.agent_control_config and !config_enabled) {
+            priv.agent_control_environment = false;
+        }
+        priv.agent_control_config = config_enabled;
+        if (!config_enabled and !priv.agent_control_environment) {
+            // A binding can reload config from inside an extension callback.
+            // Keep its panel and endpoint alive until that callback unwinds.
+            if (priv.agent_control != null and priv.agent_control_revoke_source == null) {
+                priv.agent_control_revoke_source = glib.idleAdd(onAgentControlRevoke, self);
+            }
+            return;
+        }
+        // Finish revocation before a re-enable can issue fresh credentials.
+        if (priv.agent_control_revoke_source != null) return;
+        if (priv.agent_control != null) return;
+        if (self.as(gio.Application).getIsRegistered() == 0) return;
+        if (self.as(gio.Application).getDbusConnection() == null) return;
+        priv.agent_control = AgentControl.init(self, priv.agent_control_environment) catch |err| {
+            log.warn("Gizmo agent control unavailable: {s}", .{@errorName(err)});
+            return;
+        };
+        if (priv.agent_control != null) AgentExtensions.restore(self) catch |err| {
+            log.warn("Gizmo extension restoration unavailable: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn cancelAgentControlRevoke(self: *Self) void {
+        const priv = self.private();
+        if (priv.agent_control_revoke_source) |source| {
+            _ = glib.Source.remove(source);
+            priv.agent_control_revoke_source = null;
+        }
+    }
+
+    fn onAgentControlRevoke(data: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(data orelse return 0));
+        self.private().agent_control_revoke_source = null;
+        self.destroyAgentControl();
+        self.syncAgentControl();
+        return 0;
+    }
+
+    fn destroyAgentControl(self: *Self) void {
+        const priv = self.private();
+        if (priv.agent_control) |control| {
+            priv.agent_control = null;
+            control.deinit();
+        }
+        AgentExtensions.deinit(self);
+    }
+
+    fn disposeAgentControl(self: *Self) void {
+        self.private().agent_control_disposed = true;
+        self.cancelAgentControlRevoke();
+        self.destroyAgentControl();
     }
 
     /// Returns the app winproto implementation.
@@ -1022,6 +1108,9 @@ pub const Application = extern struct {
                 \\  --headerbar-fg-color: var(--ghostty-fg);
                 \\  --headerbar-bg-color: var(--ghostty-bg);
                 \\  --headerbar-backdrop-color: oklab(from var(--headerbar-bg-color) calc(l * 0.9) a b / alpha);
+                \\  --sidebar-fg-color: var(--ghostty-fg);
+                \\  --sidebar-bg-color: oklab(from var(--ghostty-bg) calc(l * 0.95) a b / alpha);
+                \\  --sidebar-backdrop-color: oklab(from var(--ghostty-bg) calc(l * 0.9) a b / alpha);
                 \\  --overview-fg-color: var(--ghostty-fg);
                 \\  --overview-bg-color: var(--ghostty-bg);
                 \\  --popover-fg-color: var(--ghostty-fg);
@@ -1278,6 +1367,8 @@ pub const Application = extern struct {
         _: *gobject.ParamSpec,
         self: *Self,
     ) callconv(.c) void {
+        self.syncAgentControl();
+
         // Sync our accelerators for menu items.
         self.syncActionAccelerators();
 
@@ -1370,10 +1461,7 @@ pub const Application = extern struct {
         // Setup our action map
         self.startupActionMap();
 
-        self.private().agent_control = AgentControl.init(self) catch |err| control: {
-            log.warn("Gizmo agent control unavailable: {s}", .{@errorName(err)});
-            break :control null;
-        };
+        self.syncAgentControl();
 
         // Setup our global shortcuts
         self.startupGlobalShortcuts();
@@ -1571,11 +1659,7 @@ pub const Application = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
-        if (priv.agent_control) |control| {
-            control.deinit();
-            priv.agent_control = null;
-        }
-        AgentExtensions.deinit(self);
+        self.disposeAgentControl();
         if (priv.config_errors_dialog.get()) |diag| {
             diag.close();
             diag.unref(); // strong ref from get()
@@ -2302,7 +2386,7 @@ const Action = struct {
 
         // Set a default title if we don't already have one
         const t = switch (n.title.len) {
-            0 => "Ghostty",
+            0 => "Gizmo",
             else => n.title,
         };
 

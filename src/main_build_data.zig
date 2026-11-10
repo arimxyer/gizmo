@@ -9,6 +9,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const cli = @import("cli.zig");
+const cli_command = @import("build_data_options").cli_command;
 
 pub const Action = enum {
     // Shell completions
@@ -37,14 +38,14 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const writer = &stdout_writer.interface;
     switch (action) {
-        .bash => try writer.writeAll(@import("extra/bash.zig").completions),
-        .fish => try writer.writeAll(@import("extra/fish.zig").completions),
-        .zsh => try writer.writeAll(@import("extra/zsh.zig").completions),
+        .bash => try writer.writeAll(comptime @import("extra/bash.zig").completions(cli_command)),
+        .fish => try writer.writeAll(comptime @import("extra/fish.zig").completions(cli_command)),
+        .zsh => try writer.writeAll(comptime @import("extra/zsh.zig").completions(cli_command)),
         .sublime => try writer.writeAll(@import("extra/sublime.zig").syntax),
         .@"vim-syntax" => try writer.writeAll(@import("extra/vim.zig").syntax),
         .@"vim-ftdetect" => try writer.writeAll(@import("extra/vim.zig").ftdetect),
-        .@"vim-ftplugin" => try writer.writeAll(@import("extra/vim.zig").ftplugin),
-        .@"vim-compiler" => try writer.writeAll(@import("extra/vim.zig").compiler),
+        .@"vim-ftplugin" => try writer.writeAll(comptime @import("extra/vim.zig").ftplugin(cli_command)),
+        .@"vim-compiler" => try writer.writeAll(comptime @import("extra/vim.zig").compiler(cli_command)),
         .terminfo => try @import("terminfo/ghostty.zig").ghostty.encode(writer),
     }
     try stdout_writer.end();

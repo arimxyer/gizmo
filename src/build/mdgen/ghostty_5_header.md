@@ -56,7 +56,7 @@ The file format is documented below as an example:
     palette = 15=#fbf1c7
 
 You can view all available configuration options and their documentation by
-executing the command `ghostty +show-config --default --docs`. Note that this will
+executing the command `gizmo +show-config --default --docs`. Note that this will
 output the full default configuration with docs to stdout, so you may want to
 pipe that through a pager, an editor, etc.
 
@@ -86,7 +86,7 @@ encountered. Configuration errors are also shown in a dedicated window on both
 macOS and Linux (GTK). Ghostty does not treat configuration errors as fatal and
 will fall back to default values for erroneous keys.
 
-You can also view the full configuration Ghostty is loading using `ghostty
+You can also view the full configuration Ghostty is loading using `gizmo
 +show-config` from the command-line. Use the `--help` flag to additional options
 for that command.
 

@@ -49,7 +49,7 @@ pub fn send(
     assert(self.surface_id != 0);
     const app = Application.default().as(gio.Application);
 
-    const display_title = if (title.len == 0) "Ghostty" else title;
+    const display_title = if (title.len == 0) "Gizmo" else title;
     const notification = gio.Notification.new(display_title);
     defer notification.unref();
     notification.setBody(body);

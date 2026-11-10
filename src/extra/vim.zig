@@ -13,7 +13,8 @@ pub const ftdetect =
     \\au BufRead,BufNewFile */ghostty/config,*/*.ghostty/config,*/ghostty/themes/*,*.ghostty setf ghostty
     \\
 ;
-pub const ftplugin =
+pub fn ftplugin(comptime command: []const u8) []const u8 {
+    return
     \\" Vim filetype plugin file
     \\" Language: Ghostty config file
     \\" Maintainer: Ghostty <https://github.com/ghostty-org/ghostty>
@@ -31,18 +32,20 @@ pub const ftplugin =
     \\" Use syntax keywords for completion
     \\setlocal omnifunc=syntaxcomplete#Complete
     \\
-    \\" Ask ghostty to explain config keywords
-    \\setlocal keywordprg=ghostty\ +explain-config
-    \\
-    \\let b:undo_ftplugin = 'setl cms< isk< ofu< kp<'
-    \\
-    \\if !exists('current_compiler')
-    \\  compiler ghostty
-    \\  let b:undo_ftplugin .= " makeprg< errorformat<"
-    \\endif
-    \\
-;
-pub const compiler =
+    \\" Ask the application to explain config keywords
+    ++ "\nsetlocal keywordprg=" ++ command ++ "\\ +explain-config\n" ++
+        \\
+        \\let b:undo_ftplugin = 'setl cms< isk< ofu< kp<'
+        \\
+        \\if !exists('current_compiler')
+        \\  compiler ghostty
+        \\  let b:undo_ftplugin .= " makeprg< errorformat<"
+        \\endif
+        \\
+    ;
+}
+pub fn compiler(comptime command: []const u8) []const u8 {
+    return
     \\" Vim compiler file
     \\" Language: Ghostty config file
     \\" Maintainer: Ghostty <https://github.com/ghostty-org/ghostty>
@@ -54,10 +57,11 @@ pub const compiler =
     \\endif
     \\let current_compiler = "ghostty"
     \\
-    \\CompilerSet makeprg=ghostty\ +validate-config\ --config-file=%:S
-    \\CompilerSet errorformat=%f:%l:%m,%m
-    \\
-;
+    ++ "CompilerSet makeprg=" ++ command ++ "\\ +validate-config\\ --config-file=%:S\n" ++
+        \\CompilerSet errorformat=%f:%l:%m,%m
+        \\
+    ;
+}
 
 /// Generates the syntax file at comptime.
 fn comptimeGenSyntax() []const u8 {

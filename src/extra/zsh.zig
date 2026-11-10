@@ -3,38 +3,36 @@ const std = @import("std");
 const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
 
-/// A zsh completions configuration that contains all the available commands
-/// and options.
-pub const completions = comptimeGenerateZshCompletions();
-
+/// Argument syntax used for options that require an equals sign.
 const equals_required = "=-:::";
 
-fn comptimeGenerateZshCompletions() []const u8 {
+/// A zsh completions configuration with all available commands and options.
+pub fn completions(comptime command: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(50000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
-        try writeZshCompletions(&counter.writer);
+        try writeZshCompletions(&counter.writer, command);
 
         var buf: [counter.count]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        try writeZshCompletions(&writer);
+        try writeZshCompletions(&writer, command);
         const final = buf;
         return final[0..writer.end];
     }
 }
 
-fn writeZshCompletions(writer: *std.Io.Writer) !void {
+fn writeZshCompletions(writer: *std.Io.Writer, comptime command: []const u8) !void {
+    try writer.writeAll("#compdef " ++ command ++ "\n");
     try writer.writeAll(
-        \\#compdef ghostty
         \\
         \\_fonts () {
-        \\  local font_list=$(ghostty +list-fonts | grep -Z '^[A-Z]')
+    ++ "\n  local font_list=$(" ++ command ++ " +list-fonts | grep -Z '^[A-Z]')\n" ++
         \\  local fonts=(${(f)font_list})
         \\  _describe -t fonts 'fonts' fonts
         \\}
         \\
         \\_themes() {
-        \\  local theme_list=$(ghostty +list-themes | sed -E 's/^(.*) \(.*$/\1/')
+    ++ "\n  local theme_list=$(" ++ command ++ " +list-themes | sed -E 's/^(.*) \\(.*$/\\1/')\n" ++
         \\  local themes=(${(f)theme_list})
         \\  _describe -t themes 'themes' themes
         \\}
@@ -109,8 +107,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
     }
     try writer.writeAll("\n}\n\n");
 
-    try writer.writeAll(
-        \\_ghostty() {
+    try writer.writeAll("_" ++ command ++ "() {\n" ++
         \\  typeset -A opt_args
         \\  local context state line
         \\  local opt=('-e' '--help' '--version')
@@ -225,7 +222,7 @@ fn writeZshCompletions(writer: *std.Io.Writer) !void {
         \\  esac
         \\}
         \\
-        \\_ghostty "$@"
+    ++ "_" ++ command ++ " \"$@\"\n" ++
         \\
     );
 }

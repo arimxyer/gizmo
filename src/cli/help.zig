@@ -16,11 +16,8 @@ pub const Options = struct {
     }
 };
 
-/// The `help` command shows general help about Ghostty. Recognized as either
-/// `-h`, `--help`, or like other actions `+help`.
-///
-/// You can also specify `--help` or `-h` along with any action such as
-/// `+list-themes` to see help for a specific action.
+/// The `help` command shows general help for Gizmo.
+/// Use `COMMAND --help` or `+ACTION --help` for command help.
 pub fn run(alloc: Allocator) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
@@ -35,42 +32,46 @@ pub fn run(alloc: Allocator) !u8 {
     var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
     const stdout = &stdout_writer.interface;
     try stdout.writeAll(
-        \\Usage: ghostty [+action] [options]
+        \\Usage: gizmo [COMMAND | +ACTION] [options]
         \\
-        \\Run the Ghostty terminal emulator or a specific helper action.
+        \\No arguments launch the Gizmo terminal application.
+        \\Use configuration options such as --font-size=12 or --font-family="Fira Code".
+        \\Use `gizmo -e COMMAND [ARGS...]` to run a command inside the terminal.
         \\
-        \\If no `+action` is specified, run the Ghostty terminal emulator.
-        \\All configuration keys are available as command line options.
-        \\To specify a configuration key, use the `--<key>=<value>` syntax
-        \\where key and value are the same format you'd put into a configuration
-        \\file. For example, `--font-size=12` or `--font-family="Fira Code"`.
+        \\Lifecycle:
+        \\  start [-- LAUNCH_ARGUMENTS...]   Launch an independent controlled application.
+        \\  stop [--instance ID]            Request normal quit and wait for process exit.
+        \\  restart [--instance ID]         Preserve launch arguments and cwd, not sessions.
+        \\  instances                       List authenticated running instances.
+        \\  --class CLASS                   Select a class for stop/restart or live control.
         \\
-        \\To see a list of all available configuration options, please see
-        \\the `src/config/Config.zig` file. A future update will allow seeing
-        \\the list of configuration options from the command line.
+        \\Configuration and extension definitions:
+        \\  config get|set|reset|validate    Use saved files without a running application.
+        \\  extensions discover|list|install|update|remove|inspect|export
+        \\                                  Use saved extension definitions and state.
+        \\  --live                          Explicitly select the running application.
+        \\  config reload                   Reload the running application.
+        \\  extensions invoke|context|save|load
+        \\                                  Operate on the running application.
+        \\Saved changes become active at the next application startup.
         \\
-        \\A special command line argument `-e <command>` can be used to run
-        \\the specific command inside the terminal emulator. For example,
-        \\`ghostty -e top` will run the `top` command inside the terminal.
+        \\Live control:
+        \\  inspect, tabs list, terminal read|send|key|action|status
+        \\  agent list|discover|request|enable|disable
+        \\Use --instance ID when multiple controlled applications match.
+        \\Use `gizmo +agent-control --help` for complete control and lifecycle usage.
         \\
-        \\On macOS, launching the terminal emulator from the CLI is not
-        \\supported and only actions are supported. Use `open -na Ghostty.app`
-        \\instead, or `open -na ghostty.app --args --foo=bar --baz=quz` to pass
-        \\arguments.
-        \\
-        \\Available actions:
-        \\
+        \\Utilities accept bare names and the existing +ACTION form:
         \\
     );
 
     inline for (@typeInfo(Action).@"enum".field_names) |field| {
-        try stdout.print("  +{s}\n", .{field});
+        try stdout.print("  {s}\n", .{field});
     }
 
     try stdout.writeAll(
         \\
-        \\Specify `+<action> --help` to see the help for a specific action,
-        \\where `<action>` is one of actions listed above.
+        \\Use `COMMAND --help` or `+ACTION --help` for command help.
         \\
     );
     try stdout.flush();

@@ -1,76 +1,30 @@
-//! Gizmo's opt-in, session-local extension panels.
-//!
-//! Only the authenticated local agent-control dispatcher calls `request`.
-//! Definitions are inert: installing/updating a panel never runs an action.
-//! Buttons run actions only after a native click or `extensions.invoke`.
-//!
-//! Request parameters:
-//! - list: {}
-//! - install: {definition: Definition, visible?: bool}
-//! - inspect: {id: string} or {job: integer}
-//! - update: {id: string, definition?: Definition, patch?: object,
-//!            state?: {element_id: string|bool|integer}, visible?: bool}
-//!   `patch` is JSON Merge Patch applied to the stored definition. Definition
-//!   changes rebuild the panel; provide state explicitly to restore edited values.
-//! - remove: {id: string}; cancels this panel's jobs.
-//! - invoke: {id: string, element: string} or
-//!           {job: integer, operation: "cancel"|"forget"}
-//!
-//! Definition: {id, title, elements: [{id, type, label?, text?, active?,
-//!                                  options?, selected?, action?}]}.
-//! Types: label, entry, button, toggle, selection. Entry state is a string,
-//! toggle state is a boolean, selection state is its zero-based integer index.
-//! Button actions: {type:"terminal", params:{surface:ID,action:"..."}} or
-//! {type:"workflow", argv:["/absolute/executable", "literal", {element:"id"}],
-//!  cwd?:"/absolute/directory", timeout_seconds?:300}.
-//! Element arguments replace ONE argv item, never shell-interpolate. Toggle
-//! arguments are "true"/"false"; selection arguments use the selected text.
-//! Executables and cwd must be absolute. Tools inherit the user's environment
-//! and get a closed stdin. Cancellation kills the tool's process group.
-//! Descendants that create another session or process group are not tracked.
-//! Each stream is limited to 1 MiB; reaching the limit terminates the tool.
-//! Jobs use GIO async pipe reads/waits, with a 1..3600 second deadline.
-//! Inspect exposes UTF-8 stdout/stderr when valid, plus lossless base64 output.
-//! No state is written to disk; callers can save/reinstall definitions themselves.
-//! Closing a panel hides it; jobs continue until completion, deadline, or removal.
-//! Removal forgets retained jobs. `forget` releases one job and its output widget.
+//! Reusable, inert extension definitions, optional GTK panels, and named actions.
+//! Only explicit button, palette, or authenticated API invocations run actions.
+//! `extensions.discover` describes the versioned contract and persistence.
 
 const std = @import("std");
 const Application = @import("class/application.zig").Application;
 const control = @import("agent_control.zig");
+const store = @import("agent_extensions_store.zig");
+const schema = @import("agent_extensions_schema.zig");
+const Action = schema.Action;
+const Element = schema.Element;
+const Definition = schema.Definition;
+const validText = schema.validText;
+const mergePatch = schema.mergePatch;
+const discover = schema.discover;
+const Surface = @import("class/surface.zig").Surface;
+const WeakRef = @import("weak_ref.zig").WeakRef;
 const n = @import("agent_extensions_native.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 const gpa = std.heap.c_allocator;
-const max_elements = 128;
-const max_panels = 32;
+const max_elements = schema.max_elements;
+const max_panels = schema.max_panels;
 const max_jobs = 64;
 const max_output = 1024 * 1024;
-const max_text = 16384;
+const max_text = schema.max_text;
 
-const Kind = enum { label, entry, button, toggle, selection };
-const Action = struct {
-    type: enum { terminal, workflow },
-    params: Value = .null,
-    argv: []const Value = &.{},
-    cwd: ?[]const u8 = null,
-    timeout_seconds: u32 = 300,
-};
-const Element = struct {
-    id: []const u8,
-    type: Kind,
-    label: []const u8 = "",
-    text: []const u8 = "",
-    active: bool = false,
-    options: []const []const u8 = &.{},
-    selected: u32 = 0,
-    action: ?Action = null,
-};
-const Definition = struct {
-    id: []const u8,
-    title: []const u8,
-    elements: []const Element,
-};
 const ElementUI = struct {
     panel: *Panel,
     definition: *const Element,
@@ -81,17 +35,31 @@ const Panel = struct {
     runtime: *Runtime,
     definition: Definition,
     elements: []ElementUI,
-    window: *n.Widget,
+    window: ?*n.Widget,
     results: *n.Widget,
     status: *n.Widget,
+    workspace: ?[]const u8 = null,
+    persistent: bool = false,
+    workspace_scoped: bool = false,
+    data: Value = .{ .object = .empty },
+    state_arena: std.heap.ArenaAllocator,
+    caller: WeakRef(Surface) = .empty,
     last_error: ?[]const u8 = null,
     latest_job: ?u64 = null,
 
     fn destroy(self: *Panel) void {
         // Destroy widgets before freeing callback data in the arena.
-        n.gtk_window_destroy(self.window);
-        n.g_object_unref(self.window);
+        self.caller.deinit();
+        if (self.window) |window| {
+            n.gtk_window_destroy(window);
+            n.g_object_unref(window);
+        }
+        for (self.elements) |item| n.g_object_unref(item.widget);
+        n.g_object_unref(self.results);
+        n.g_object_unref(self.status);
+        self.state_arena.deinit();
         if (self.last_error) |message| gpa.free(message);
+        if (self.workspace) |workspace| gpa.free(workspace);
         self.arena.deinit();
         gpa.destroy(self);
     }
@@ -101,6 +69,27 @@ const Panel = struct {
             if (std.mem.eql(u8, id, item.definition.id)) return item;
         }
         return error.UnknownElement;
+    }
+
+    fn action(self: *Panel, id: []const u8) !Action {
+        for (self.definition.actions) |item| if (std.mem.eql(u8, item.id, id)) return item;
+        return error.UnknownAction;
+    }
+
+    fn visible(self: *Panel) bool {
+        return if (self.window) |window| n.gtk_widget_get_visible(window) != 0 else false;
+    }
+
+    fn show(self: *Panel, show_panel: bool) !void {
+        if (show_panel) {
+            const window = self.window orelse return error.ExtensionHasNoPanel;
+            captureCaller(self);
+            n.gtk_window_set_application(window, @ptrCast(self.runtime.app.as(@import("gtk").Application)));
+            n.gtk_window_present(window);
+        } else if (self.window) |window| {
+            n.gtk_widget_set_visible(window, 0);
+            n.gtk_window_set_application(window, null);
+        }
     }
 
     fn setError(self: *Panel, message: []const u8) void {
@@ -193,64 +182,6 @@ fn jobId(value: Value) !u64 {
 fn boolean(value: Value) !bool {
     return if (value == .bool) value.bool else error.ExpectedBoolean;
 }
-fn validText(text: []const u8, limit: usize) bool {
-    return text.len <= limit and std.mem.indexOfScalar(u8, text, 0) == null and std.unicode.utf8ValidateSlice(text);
-}
-fn validId(id: []const u8) bool {
-    if (id.len == 0 or id.len > 128) return false;
-    for (id) |c| switch (c) {
-        'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
-        else => return false,
-    };
-    return true;
-}
-
-fn validate(def: Definition) !void {
-    if (!validId(def.id)) return error.InvalidExtensionId;
-    if (!validText(def.title, 256)) return error.InvalidTitle;
-    if (def.elements.len > max_elements) return error.TooManyElements;
-    for (def.elements, 0..) |item, index| {
-        if (!validId(item.id)) return error.InvalidElementId;
-        for (def.elements[0..index]) |previous| {
-            if (std.mem.eql(u8, previous.id, item.id)) return error.DuplicateElementId;
-        }
-        if (!validText(item.label, max_text) or !validText(item.text, max_text)) return error.InvalidText;
-        if (item.options.len > max_elements) return error.TooManyOptions;
-        for (item.options) |option| if (!validText(option, max_text)) return error.InvalidOption;
-        if (item.type == .selection and (item.options.len == 0 or item.selected >= item.options.len)) return error.InvalidSelection;
-        if (item.type == .button and item.action == null) return error.MissingButtonAction;
-        if (item.action) |action| {
-            if (item.type != .button) return error.ActionsRequireButton;
-            switch (action.type) {
-                .terminal => {
-                    if (action.params != .object) return error.InvalidTerminalAction;
-                    _ = try string(try required(action.params, "action"));
-                },
-                .workflow => {
-                    if (action.argv.len == 0 or action.argv.len > 128) return error.InvalidArgv;
-                    const executable = try string(action.argv[0]);
-                    if (!std.fs.path.isAbsolute(executable)) return error.ExecutableMustBeAbsolute;
-                    if (action.timeout_seconds == 0 or action.timeout_seconds > 3600) return error.InvalidTimeout;
-                    if (action.cwd) |cwd| {
-                        if (!validText(cwd, max_text) or !std.fs.path.isAbsolute(cwd)) return error.InvalidWorkingDirectory;
-                    }
-                    for (action.argv) |arg| {
-                        if (arg == .string) {
-                            if (!validText(arg.string, max_text)) return error.InvalidArgument;
-                        } else if (arg == .object and arg.object.count() == 1) {
-                            const target = try string(try required(arg, "element"));
-                            var found = false;
-                            for (def.elements) |other| {
-                                if (std.mem.eql(u8, target, other.id) and other.type != .button) found = true;
-                            }
-                            if (!found) return error.InvalidArgumentElement;
-                        } else return error.InvalidArgument;
-                    }
-                },
-            }
-        }
-    }
-}
 
 fn createPanel(r: *Runtime, value: Value) !*Panel {
     // Reparse a serialized value so the panel never borrows request storage.
@@ -259,37 +190,51 @@ fn createPanel(r: *Runtime, value: Value) !*Panel {
     p.arena = std.heap.ArenaAllocator.init(gpa);
     errdefer p.arena.deinit();
     const alloc = p.arena.allocator();
-    const json = try std.json.Stringify.valueAlloc(alloc, value, .{});
-    if (json.len > 512 * 1024) return error.DefinitionTooLarge;
-    const parsed = try std.json.parseFromSlice(Definition, alloc, json, .{ .allocate = .alloc_always });
-    const def = parsed.value;
-    try validate(def);
+    const def = try schema.parseDefinition(alloc, value);
     const ui = try alloc.alloc(ElementUI, def.elements.len);
     const app: *n.Object = @ptrCast(r.app.as(@import("gtk").Application));
     const parent = n.gtk_application_get_active_window(app);
-    const window = n.gtk_application_window_new(app);
-    _ = n.g_object_ref(window);
-    errdefer {
-        n.gtk_window_destroy(window);
-        n.g_object_unref(window);
+    const window = if (def.panel) n.gtk_window_new() else null;
+    if (window) |w| {
+        _ = n.g_object_ref(w);
+        // Hidden panels stay detached until explicit presentation.
+        n.gtk_window_set_title(w, try alloc.dupeSentinel(u8, def.title, 0));
+        n.gtk_window_set_default_size(w, 480, 480);
+        n.gtk_window_set_hide_on_close(w, 1);
+        n.gtk_window_set_transient_for(w, parent);
     }
-    n.gtk_window_set_title(window, try alloc.dupeSentinel(u8, def.title, 0));
-    n.gtk_window_set_default_size(window, 480, 480);
-    n.gtk_window_set_hide_on_close(window, 1);
-    n.gtk_window_set_transient_for(window, parent);
+    errdefer if (window) |w| {
+        n.gtk_window_destroy(w);
+        n.g_object_unref(w);
+    };
     const box = n.gtk_box_new(1, 8); // GTK_ORIENTATION_VERTICAL
+    _ = n.g_object_ref_sink(box);
+    defer n.g_object_unref(box);
     n.gtk_widget_set_margin_top(box, 12);
     n.gtk_widget_set_margin_bottom(box, 12);
     n.gtk_widget_set_margin_start(box, 12);
     n.gtk_widget_set_margin_end(box, 12);
-    const scroll = n.gtk_scrolled_window_new();
-    n.gtk_scrolled_window_set_child(scroll, box);
-    n.gtk_window_set_child(window, scroll);
-    const status = n.gtk_label_new("Gizmo extension · session only");
+    if (window) |w| {
+        const scroll = n.gtk_scrolled_window_new();
+        n.gtk_scrolled_window_set_child(scroll, box);
+        n.gtk_window_set_child(w, scroll);
+    }
+    const status = n.gtk_label_new("Gizmo extension · explicit actions only");
+    _ = n.g_object_ref_sink(status);
     n.gtk_label_set_wrap(status, 1);
     const results = n.gtk_box_new(1, 8);
-    p.* = .{ .arena = p.arena, .runtime = r, .definition = def, .elements = ui, .window = window, .results = results, .status = status };
-    for (def.elements, ui) |*item, *element| {
+    _ = n.g_object_ref_sink(results);
+    p.* = .{ .arena = p.arena, .state_arena = std.heap.ArenaAllocator.init(gpa), .runtime = r, .definition = def, .elements = ui[0..0], .window = window, .results = results, .status = status };
+    errdefer {
+        p.caller.deinit();
+        p.state_arena.deinit();
+        for (p.elements) |item| n.g_object_unref(item.widget);
+        n.g_object_unref(status);
+        n.g_object_unref(results);
+    }
+    if (window) |w| _ = n.g_signal_connect_data(w, "close-request", @ptrCast(&panelClose), p, null, 0);
+    captureCaller(p);
+    for (def.elements, ui, 0..) |*item, *element, index| {
         const label = try alloc.dupeSentinel(u8, item.label, 0);
         const widget = switch (item.type) {
             .label => blk: {
@@ -319,7 +264,9 @@ fn createPanel(r: *Runtime, value: Value) !*Panel {
                 break :blk w;
             },
         };
+        _ = n.g_object_ref_sink(widget);
         element.* = .{ .panel = p, .definition = item, .widget = widget };
+        p.elements = ui[0 .. index + 1];
         if (item.type == .button) {
             _ = n.g_signal_connect_data(widget, "clicked", @ptrCast(&buttonClicked), element, null, 0);
         }
@@ -336,9 +283,15 @@ fn createPanel(r: *Runtime, value: Value) !*Panel {
     return p;
 }
 
+fn panelClose(_: *n.Widget, data: ?*anyopaque) callconv(.c) c_int {
+    const p: *Panel = @ptrCast(@alignCast(data orelse return 0));
+    p.show(false) catch {};
+    return 1;
+}
+
 fn buttonClicked(_: *n.Widget, data: ?*anyopaque) callconv(.c) void {
     const item: *ElementUI = @ptrCast(@alignCast(data orelse return));
-    _ = invoke(item) catch |err| {
+    _ = dispatchAction(item.panel, item.definition.action orelse return, .{ .object = .empty }) catch |err| {
         if (item.panel.last_error == null) item.panel.setError(@errorName(err));
         return;
     };
@@ -354,24 +307,20 @@ fn state(item: *const ElementUI, alloc: Allocator) !Value {
     };
 }
 fn validateState(p: *Panel, changes: Value) !void {
-    if (changes != .object) return error.ExpectedStateObject;
-    var it = changes.object.iterator();
-    while (it.next()) |entry| {
-        const item = try p.element(entry.key_ptr.*);
-        const value = entry.value_ptr.*;
-        switch (item.definition.type) {
-            .entry, .label => if (!validText(try string(value), max_text)) return error.InvalidText,
-            .toggle => _ = try boolean(value),
-            .selection => if (value != .integer or value.integer < 0 or @as(u64, @intCast(value.integer)) >= item.definition.options.len) return error.InvalidSelection,
-            .button => return error.ButtonHasNoState,
-        }
-    }
+    try schema.validateState(p.definition, changes);
 }
 fn applyState(p: *Panel, alloc: Allocator, changes: Value) !void {
     try validateState(p, changes);
+    var next: std.json.ObjectMap = .empty;
+    var previous = p.data.object.iterator();
+    while (previous.next()) |entry| try next.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
     var it = changes.object.iterator();
     while (it.next()) |entry| {
-        const item = try p.element(entry.key_ptr.*);
+        const item = p.element(entry.key_ptr.*) catch {
+            try next.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+            if (next.count() > max_elements) return error.TooManyStateKeys;
+            continue;
+        };
         const value = entry.value_ptr.*;
         switch (item.definition.type) {
             .entry => n.gtk_editable_set_text(item.widget, try alloc.dupeSentinel(u8, value.string, 0)),
@@ -381,41 +330,203 @@ fn applyState(p: *Panel, alloc: Allocator, changes: Value) !void {
             .button => unreachable,
         }
     }
+    const json = try std.json.Stringify.valueAlloc(alloc, Value{ .object = next }, .{});
+    var replacement = std.heap.ArenaAllocator.init(gpa);
+    errdefer replacement.deinit();
+    const parsed = try std.json.parseFromSlice(Value, replacement.allocator(), json, .{ .allocate = .alloc_always });
+    p.state_arena.deinit();
+    p.state_arena = replacement;
+    p.data = parsed.value;
+}
+
+fn stateSnapshot(p: *Panel, alloc: Allocator) !Value {
+    var values: std.json.ObjectMap = .empty;
+    var it = p.data.object.iterator();
+    while (it.next()) |entry| try values.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    for (p.elements) |*item| {
+        if (item.definition.type != .button) try values.put(alloc, item.definition.id, try state(item, alloc));
+    }
+    return .{ .object = values };
 }
 
 fn panelResponse(p: *Panel, alloc: Allocator) ![]const u8 {
-    var values: std.json.ObjectMap = .empty;
-    for (p.elements) |*item| try values.put(alloc, item.definition.id, try state(item, alloc));
+    const values = try stateSnapshot(p, alloc);
     var job_ids: std.ArrayList(u64) = .empty;
     defer job_ids.deinit(alloc);
     for (p.runtime.jobs.items) |j| {
         if (std.mem.eql(u8, j.panel_id, p.definition.id)) try job_ids.append(alloc, j.id);
     }
     return std.json.Stringify.valueAlloc(alloc, .{
-        .scope = "session",
+        .scope = if (p.workspace_scoped) "workspace" else "app",
+        .workspace = p.workspace,
+        .persistent = p.persistent,
         .definition = p.definition,
-        .state = Value{ .object = values },
-        .visible = n.gtk_widget_get_visible(p.window) != 0,
+        .state = values,
+        .visible = p.visible(),
         .last_error = p.last_error,
         .latest_job = p.latest_job,
         .jobs = job_ids.items,
     }, .{});
 }
 
-fn mergePatch(alloc: Allocator, target: Value, patch: Value, depth: usize) error{ OutOfMemory, PatchTooDeep }!Value {
-    if (depth > 32) return error.PatchTooDeep;
-    if (patch != .object) return patch;
-    var result = if (target == .object) target else Value{ .object = .empty };
-    var it = patch.object.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* == .null) {
-            _ = result.object.swapRemove(entry.key_ptr.*);
-        } else {
-            const old = result.object.get(entry.key_ptr.*) orelse .null;
-            try result.object.put(alloc, entry.key_ptr.*, try mergePatch(alloc, old, entry.value_ptr.*, depth + 1));
+fn configureScope(p: *Panel, params: Value, alloc: Allocator, allow_switch: bool) !void {
+    var workspace = p.workspace;
+    var workspace_scoped = p.workspace_scoped;
+    if (field(params, "scope")) |value| {
+        switch (try schema.parseScope(value)) {
+            .workspace => workspace_scoped = true,
+            .app => {
+                workspace_scoped = false;
+                workspace = null;
+            },
         }
     }
-    return result;
+    if (field(params, "workspace")) |value| {
+        workspace = try store.canonicalWorkspace(alloc, try string(value));
+        workspace_scoped = true;
+    }
+    const key: Value = if (workspace) |value| .{ .string = value } else .null;
+    if (!allow_switch and (workspace_scoped != p.workspace_scoped or !sameWorkspace(key, p.workspace))) return error.WorkspaceChangeRequiresLoad;
+    if (workspace_scoped == p.workspace_scoped and sameWorkspace(key, p.workspace)) return;
+    const owned_workspace = if (workspace) |value| try gpa.dupe(u8, value) else null;
+    if (p.workspace) |old| gpa.free(old);
+    p.workspace = owned_workspace;
+    p.workspace_scoped = workspace_scoped;
+}
+
+fn jsonValue(alloc: Allocator, value: anytype) !Value {
+    const bytes = try std.json.Stringify.valueAlloc(alloc, value, .{});
+    return (try std.json.parseFromSlice(Value, alloc, bytes, .{})).value;
+}
+
+fn sameWorkspace(value: Value, workspace: ?[]const u8) bool {
+    if (workspace) |key| return value == .string and std.mem.eql(u8, key, value.string);
+    return value == .null;
+}
+
+fn persistPanel(p: *Panel, alloc: Allocator) !void {
+    if (p.workspace_scoped and p.workspace == null) return error.WorkspaceRequired;
+    var transaction = try store.Transaction.init(alloc);
+    defer transaction.deinit();
+    const catalog = transaction.catalog;
+    const definitions = catalog.object.getPtr("definitions").?;
+    var entry: ?*Value = null;
+    for (definitions.array.items) |*item| {
+        const definition = try required(item.*, "definition");
+        if (std.mem.eql(u8, try string(try required(definition, "id")), p.definition.id)) {
+            entry = item;
+            break;
+        }
+    }
+    if (entry == null) {
+        if (definitions.array.items.len >= max_panels) return error.TooManyExtensions;
+        try definitions.array.append(try jsonValue(alloc, .{ .definition = p.definition, .scope = if (p.workspace_scoped) "workspace" else "app", .states = [_]Value{} }));
+        entry = &definitions.array.items[definitions.array.items.len - 1];
+    }
+    const item = entry.?;
+    try item.object.put(alloc, "definition", try jsonValue(alloc, p.definition));
+    try item.object.put(alloc, "scope", .{ .string = if (p.workspace_scoped) "workspace" else "app" });
+    const states = item.object.getPtr("states") orelse return error.InvalidExtensionStore;
+    if (states.* != .array or states.array.items.len > 64) return error.InvalidExtensionStore;
+    const saved = try jsonValue(alloc, .{ .workspace = p.workspace, .state = try stateSnapshot(p, alloc) });
+    var replaced = false;
+    for (states.array.items) |*slot| {
+        if (sameWorkspace(try required(slot.*, "workspace"), p.workspace)) {
+            slot.* = saved;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        if (states.array.items.len >= 64) return error.TooManyWorkspaceStates;
+        try states.array.append(saved);
+    }
+    try transaction.commit(alloc);
+}
+
+fn removeStored(id: []const u8, alloc: Allocator) !void {
+    var transaction = try store.Transaction.init(alloc);
+    defer transaction.deinit();
+    const catalog = transaction.catalog;
+    const definitions = catalog.object.getPtr("definitions").?;
+    for (definitions.array.items, 0..) |entry, index| {
+        const definition = try required(entry, "definition");
+        if (!std.mem.eql(u8, id, try string(try required(definition, "id")))) continue;
+        _ = definitions.array.orderedRemove(index);
+        try transaction.commit(alloc);
+        return;
+    }
+}
+
+fn restoreState(p: *Panel, entry: Value, alloc: Allocator) !void {
+    if (p.workspace_scoped and p.workspace == null) return;
+    // Prepare and validate before discarding the currently loaded workspace.
+    const restored = try schema.restoredState(alloc, p.definition, entry, p.workspace);
+    // Never leak one workspace's values into another workspace.
+    p.state_arena.deinit();
+    p.state_arena = std.heap.ArenaAllocator.init(gpa);
+    p.data = .{ .object = .empty };
+    try applyState(p, alloc, restored);
+}
+
+/// Call only after explicit agent-control opt-in. No panels are presented.
+/// Workspace state is loaded only with an explicit canonical workspace request.
+pub fn restore(app: *Application) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const catalog = try store.read(alloc);
+    const r = try runtime(app);
+    for (catalog.object.get("definitions").?.array.items) |entry| {
+        const p = try createPanel(r, try required(entry, "definition"));
+        errdefer p.destroy();
+        for (r.panels.items) |other| {
+            if (std.mem.eql(u8, other.definition.id, p.definition.id)) return error.ExtensionAlreadyInstalled;
+        }
+        const scope = try string(try required(entry, "scope"));
+        if (!std.mem.eql(u8, scope, "app") and !std.mem.eql(u8, scope, "workspace")) return error.InvalidExtensionScope;
+        p.workspace_scoped = std.mem.eql(u8, scope, "workspace");
+        p.persistent = true;
+        try restoreState(p, entry, alloc);
+        try r.panels.append(gpa, p);
+    }
+}
+
+pub const PaletteAction = struct { extension: []const u8, action: []const u8, title: []const u8 };
+
+/// The caller owns strings in its allocator; collecting never invokes actions.
+pub fn paletteActions(app: *Application, alloc: Allocator) ![]PaletteAction {
+    var actions: std.ArrayList(PaletteAction) = .empty;
+    for (runtimes.items) |r| {
+        if (r.app != app) continue;
+        for (r.panels.items) |p| for (p.definition.actions) |action| {
+            if (!action.palette) continue;
+            try actions.append(alloc, .{
+                .extension = try alloc.dupe(u8, p.definition.id),
+                .action = try alloc.dupe(u8, action.id),
+                .title = try alloc.print("{s}: {s}", .{ p.definition.title, if (action.title.len != 0) action.title else action.id }),
+            });
+        };
+    }
+    return actions.toOwnedSlice(alloc);
+}
+
+pub fn invokePalette(app: *Application, id: []const u8, action: []const u8, caller: ?*Surface) !void {
+    if (app.agentControl() == null) return error.AgentFeatureDisabled;
+    const p = try (try runtime(app)).panel(id);
+    p.caller.set(caller);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var context = Value{ .object = .empty };
+    if (caller) |surface| {
+        p.caller.set(surface);
+        if (surface.core()) |core| try context.object.put(alloc, "surface", .{ .string = try alloc.print("{d}", .{core.id}) });
+    }
+    _ = dispatchAction(p, action, context) catch |err| {
+        p.setError(@errorName(err));
+        return err;
+    };
 }
 
 /// Returns a JSON payload (not an agent-control response envelope).
@@ -425,7 +536,7 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
     const method = try string(try required(value, "method"));
     const params = field(value, "params") orelse Value{ .object = .empty };
     if (params != .object) return error.ExpectedParametersObject;
-    if (field(params, "persist") != null or field(params, "persist_path") != null or field(params, "persistent") != null) return error.ExtensionsAreSessionOnly;
+    if (field(params, "persist_path") != null) return error.CustomPersistencePathNotAllowed;
     if (std.mem.eql(u8, method, "extensions.discover")) return discover(alloc);
     const r = try runtime(app);
     if (std.mem.eql(u8, method, "extensions.list")) {
@@ -435,26 +546,45 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
             const encoded = try std.json.Stringify.valueAlloc(alloc, .{
                 .id = p.definition.id,
                 .title = p.definition.title,
-                .visible = n.gtk_widget_get_visible(p.window) != 0,
+                .visible = p.visible(),
+                .scope = if (p.workspace_scoped) "workspace" else "app",
+                .workspace = p.workspace,
+                .persistent = p.persistent,
+                .actions = p.definition.actions,
                 .latest_job = p.latest_job,
             }, .{});
             try summaries.append(alloc, (try std.json.parseFromSlice(Value, alloc, encoded, .{})).value);
         }
-        return std.json.Stringify.valueAlloc(alloc, .{ .scope = "session", .extensions = summaries.items }, .{});
+        return std.json.Stringify.valueAlloc(alloc, .{ .extensions = summaries.items }, .{});
     }
     if (std.mem.eql(u8, method, "extensions.install")) {
         if (r.panels.items.len >= max_panels) return error.TooManyExtensions;
         try r.panels.ensureUnusedCapacity(gpa, 1);
-        const visible = if (field(params, "visible")) |v| try boolean(v) else true;
+        const visible = if (field(params, "visible")) |v| try boolean(v) else false;
         const p = try createPanel(r, try required(params, "definition"));
         errdefer p.destroy();
         for (r.panels.items) |other| {
             if (std.mem.eql(u8, other.definition.id, p.definition.id)) return error.ExtensionAlreadyInstalled;
         }
-        if (visible) n.gtk_window_present(p.window);
+        try configureScope(p, params, alloc, true);
+        if (p.workspace_scoped and p.workspace == null) return error.WorkspaceRequired;
+        if (field(params, "state")) |changes| try applyState(p, alloc, changes);
+        if (field(params, "persist")) |v| p.persistent = try boolean(v);
+        if (p.persistent) try persistPanel(p, alloc);
+        try p.show(visible);
         const response = try panelResponse(p, alloc);
         r.panels.appendAssumeCapacity(p);
         return response;
+    }
+    if (std.mem.eql(u8, method, "extensions.context")) {
+        const p = try r.panel(try idParam(params));
+        const action = if (field(params, "action")) |id| try p.action(try string(id)) else Action{ .id = "context", .type = .terminal };
+        const resolved = try resolveContext(p, action, alloc, field(params, "context") orelse .{ .object = .empty });
+        if (field(resolved, "surface") == null) return std.json.Stringify.valueAlloc(alloc, .{ .context = resolved, .program_status = [_]Value{} }, .{});
+        const core = try control.findSurface(app, resolved);
+        var snapshot = try core.programStatusSnapshot(alloc);
+        defer snapshot.deinit(alloc);
+        return std.json.Stringify.valueAlloc(alloc, .{ .context = resolved, .program_status = snapshot.records }, .{});
     }
     if (std.mem.eql(u8, method, "extensions.inspect")) {
         if (field(params, "job")) |id| return jobResponse(try r.job(try jobId(id)), alloc);
@@ -462,6 +592,7 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
     }
     if (std.mem.eql(u8, method, "extensions.remove")) {
         const p = try r.panel(try idParam(params));
+        if (p.persistent) try removeStored(p.definition.id, alloc);
         r.cancelPanel(p.definition.id);
         for (r.panels.items, 0..) |other, index| {
             if (other == p) {
@@ -474,7 +605,8 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
     }
     if (std.mem.eql(u8, method, "extensions.update")) {
         const old = try r.panel(try idParam(params));
-        const visible = if (field(params, "visible")) |v| try boolean(v) else n.gtk_widget_get_visible(old.window) != 0;
+        try configureScope(old, params, alloc, false);
+        const visible = if (field(params, "visible")) |v| try boolean(v) else old.visible();
         const definition = field(params, "definition");
         const patch = field(params, "patch");
         if (definition != null and patch != null) return error.DefinitionAndPatchAreExclusive;
@@ -488,6 +620,17 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
             p = try createPanel(r, replacement);
             errdefer p.destroy();
             if (!std.mem.eql(u8, old.definition.id, p.definition.id)) return error.ExtensionIdCannotChange;
+            p.workspace_scoped = old.workspace_scoped;
+            p.persistent = old.persistent;
+            if (old.workspace) |workspace| p.workspace = try gpa.dupe(u8, workspace);
+            const previous_state = try stateSnapshot(old, alloc);
+            // Keep keys that still match the new definition; drop obsolete UI keys.
+            var it = previous_state.object.iterator();
+            while (it.next()) |entry| {
+                var one: std.json.ObjectMap = .empty;
+                try one.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+                applyState(p, alloc, .{ .object = one }) catch continue;
+            }
             if (field(params, "state")) |changes| try applyState(p, alloc, changes);
             // Retain both asynchronous jobs and their native output across edits.
             for (r.jobs.items) |j| {
@@ -504,7 +647,8 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
             }
             old.destroy();
         } else if (field(params, "state")) |changes| try applyState(p, alloc, changes);
-        if (visible) n.gtk_window_present(p.window) else n.gtk_widget_set_visible(p.window, 0);
+        if (p.persistent) try persistPanel(p, alloc);
+        try p.show(visible);
         return panelResponse(p, alloc);
     }
     if (std.mem.eql(u8, method, "extensions.invoke")) {
@@ -529,32 +673,101 @@ pub fn request(app: *Application, alloc: Allocator, value: Value) ![]const u8 {
             return error.UnknownJobOperation;
         }
         const p = try r.panel(try idParam(params));
-        const item = try p.element(try string(try required(params, "element")));
-        const id = invoke(item) catch |err| {
+        const action_id = try string(try required(params, "action"));
+        const id = dispatchAction(p, action_id, field(params, "context") orelse .{ .object = .empty }) catch |err| {
             if (p.last_error == null) p.setError(@errorName(err));
             return err;
         };
         return std.json.Stringify.valueAlloc(alloc, .{ .invoked = true, .job = id }, .{});
     }
+    if (std.mem.eql(u8, method, "extensions.export")) return panelResponse(try r.panel(try idParam(params)), alloc);
+    if (std.mem.eql(u8, method, "extensions.save")) {
+        const p = try r.panel(try idParam(params));
+        try configureScope(p, params, alloc, false);
+        try persistPanel(p, alloc);
+        p.persistent = true;
+        return panelResponse(p, alloc);
+    }
+    if (std.mem.eql(u8, method, "extensions.load")) {
+        const catalog = try store.read(alloc);
+        const id = try idParam(params);
+        for (catalog.object.get("definitions").?.array.items) |entry| {
+            const def = try required(entry, "definition");
+            if (!std.mem.eql(u8, id, try string(try required(def, "id")))) continue;
+            const p = try r.panel(id);
+            if (field(params, "scope") != null) return error.LoadDoesNotChangeScope;
+            try configureScope(p, params, alloc, true);
+            if (p.workspace_scoped and p.workspace == null) return error.WorkspaceRequired;
+            try restoreState(p, entry, alloc);
+            return panelResponse(p, alloc);
+        }
+        return error.ExtensionNotSaved;
+    }
     return error.UnknownExtensionMethod;
 }
 
-fn invoke(item: *ElementUI) !?u64 {
-    if (item.definition.type != .button) return error.ElementIsNotButton;
-    const action = item.definition.action orelse return error.MissingButtonAction;
-    const p = item.panel;
+fn captureCaller(p: *Panel) void {
+    const core = p.runtime.app.core().focusedSurface() orelse return;
+    for (p.runtime.app.core().surfaces.items) |surface| {
+        if (surface.core() == core) {
+            p.caller.set(surface.gobj());
+            return;
+        }
+    }
+}
+
+fn resolveContext(p: *Panel, action: Action, alloc: Allocator, context: Value) !Value {
+    if (context != .object) return error.ExpectedContextObject;
+    var params = Value{ .object = .empty };
+    if (action.params == .object) {
+        var it = action.params.object.iterator();
+        while (it.next()) |entry| try params.object.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+    if (field(context, "surface")) |id| {
+        try params.object.put(alloc, "surface", .{ .string = try string(id) });
+        _ = try control.findSurface(p.runtime.app, params);
+    } else switch (action.context) {
+        .explicit => return error.RuntimeSurfaceRequired,
+        .none => {},
+        .focused => {
+            const core = p.runtime.app.core().focusedSurface() orelse return error.NoFocusedTerminal;
+            try params.object.put(alloc, "surface", .{ .string = try alloc.print("{d}", .{core.id}) });
+        },
+        .caller => {
+            const caller = p.caller.get() orelse return error.RuntimeSurfaceRequired;
+            defer caller.unref();
+            const core = caller.core() orelse return error.RuntimeSurfaceRequired;
+            try params.object.put(alloc, "surface", .{ .string = try alloc.print("{d}", .{core.id}) });
+        },
+    }
+    if (field(params, "surface") != null) {
+        const core = try control.findSurface(p.runtime.app, params);
+        if (core.rt_surface.gobj().getPwd()) |cwd| try params.object.put(alloc, "cwd", .{ .string = cwd });
+    }
+    if (p.workspace) |workspace| try params.object.put(alloc, "workspace", .{ .string = workspace });
+    return params;
+}
+
+fn dispatchAction(p: *Panel, id: []const u8, context: Value) !?u64 {
+    if (p.runtime.app.agentControl() == null) return error.AgentFeatureDisabled;
+    if (p.workspace_scoped and p.workspace == null) return error.WorkspaceRequired;
+    const action = try p.action(id);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const resolved = try resolveContext(p, action, alloc, context);
     if (p.last_error) |old| gpa.free(old);
     p.last_error = null;
     switch (action.type) {
         .terminal => {
-            if (!try control.performBinding(p.runtime.app, gpa, action.params)) return error.TerminalActionFailed;
+            if (!try control.performBinding(p.runtime.app, alloc, resolved)) return error.TerminalActionFailed;
             n.gtk_label_set_text(p.status, "Gizmo terminal action completed");
             return null;
         },
         .workflow => {
-            const j = try startJob(p, action);
+            const j = try startJob(p, action, resolved);
             p.latest_job = j.id;
-            n.gtk_label_set_text(p.status, "Latest Gizmo workflow: see results below or inspect latest_job");
+            n.gtk_label_set_text(p.status, "Latest Gizmo workflow: inspect latest_job");
             return j.id;
         },
     }
@@ -640,7 +853,7 @@ fn nativeOutput(bytes: []const u8, binary: []const u8) []const u8 {
     return bytes[0..end];
 }
 
-fn startJob(p: *Panel, action: Action) !*Job {
+fn startJob(p: *Panel, action: Action, context: Value) !*Job {
     const r = p.runtime;
     if (r.jobs.items.len >= max_jobs) return error.TooManyJobsForgetCompletedJobs;
     if (r.next_job > std.math.maxInt(i64)) return error.JobIdsExhausted;
@@ -648,9 +861,23 @@ fn startJob(p: *Panel, action: Action) !*Job {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const values = try stateSnapshot(p, alloc);
     const argv = try alloc.allocSentinel(?[*:0]const u8, action.argv.len, null);
     for (action.argv, argv) |arg, *output| {
         const text = if (arg == .string) arg.string else blk: {
+            if (field(arg, "context")) |key| {
+                const name = try string(key);
+                break :blk try string(field(context, name) orelse return error.ContextValueUnavailable);
+            }
+            if (field(arg, "state")) |key| {
+                const value = values.object.get(try string(key)) orelse return error.StateValueUnavailable;
+                break :blk switch (value) {
+                    .string => value.string,
+                    .bool => if (value.bool) "true" else "false",
+                    .integer => try alloc.print("{d}", .{value.integer}),
+                    else => return error.InvalidArgumentState,
+                };
+            }
             const item = try p.element(try string(try required(arg, "element")));
             const current = try state(item, alloc);
             break :blk switch (current) {
@@ -801,77 +1028,6 @@ fn jobResponse(j: *Job, alloc: Allocator) ![]const u8 {
 fn childSetup(_: ?*anyopaque) callconv(.c) void {
     // Only async-signal-safe C calls are permitted between fork and exec.
     if (n.setsid() < 0) n._exit(127);
-}
-
-fn discover(alloc: Allocator) ![]const u8 {
-    const example =
-        \\{"method":"extensions.install","params":{"definition":{"id":"hello","title":"Gizmo tools","elements":[{"id":"intro","type":"label","text":"Run a tool without shell interpolation."},{"id":"name","type":"entry","label":"Name","text":"Gizmo"},{"id":"verbose","type":"toggle","label":"Verbose"},{"id":"mode","type":"selection","label":"Mode","options":["short","long"]},{"id":"run","type":"button","label":"Run","action":{"type":"workflow","argv":["/usr/bin/printf","Hello %s\\n",{"element":"name"}]}}]}}}
-    ;
-    const installation = (try std.json.parseFromSlice(Value, alloc, example, .{})).value;
-    return std.json.Stringify.valueAlloc(alloc, .{
-        .scope = "session",
-        .persistence = false,
-        .methods = .{
-            .@"extensions.list" = "{}",
-            .@"extensions.install" = "{definition,visible?:bool}",
-            .@"extensions.inspect" = "{id:string} | {job:integer}",
-            .@"extensions.update" = "{id,definition?:object,patch?:object,state?:object,visible?:bool}",
-            .@"extensions.remove" = "{id:string}",
-            .@"extensions.invoke" = "{id,element} | {job,operation:cancel|forget}",
-        },
-        .limits = .{ .panels = max_panels, .elements = max_elements, .retained_jobs = max_jobs, .output_bytes_per_stream = max_output },
-        .element_types = [_][]const u8{ "label", "entry", "button", "toggle", "selection" },
-        .state = "Map element IDs to strings (entry/label), booleans (toggle), or zero-based integer indices (selection). State changes never execute actions.",
-        .patch = "JSON Merge Patch of definition; arrays replace. Definition rebuilds reset edits unless state is supplied.",
-        .terminal_action = .{ .type = "terminal", .params = .{ .surface = "ID from tree", .action = "copy_to_clipboard" } },
-        .workflow = "Explicit absolute executable argv. Each argument is a literal string or {element:ID}, substituted as one argument. Optional absolute cwd and timeout_seconds (1..3600, default 300). No install-time execution.",
-        .jobs = "Inspect exposes running/completed status, exit_code, signal, reason, truncated, stdout/stderr UTF-8 or null, and lossless stdout_base64/stderr_base64. Cancel kills the tool's process group; forget also releases retained results. Removal cancels and forgets panel jobs. Descendants that create another session or process group are not tracked.",
-        .install_example = installation,
-        .invoke_example = .{ .method = "extensions.invoke", .params = .{ .id = "hello", .element = "run" } },
-        .inspect_job_example = .{ .method = "extensions.inspect", .params = .{ .job = 1 } },
-    }, .{});
-}
-
-test "extension definitions reject automatic actions and invalid argv" {
-    const testing = std.testing;
-    try testing.expectError(error.ActionsRequireButton, validate(.{
-        .id = "tools",
-        .title = "Gizmo tools",
-        .elements = &.{.{ .id = "input", .type = .entry, .action = .{ .type = .workflow, .argv = &.{} } }},
-    }));
-    try testing.expectError(error.ExecutableMustBeAbsolute, validate(.{
-        .id = "tools",
-        .title = "Gizmo tools",
-        .elements = &.{.{ .id = "run", .type = .button, .action = .{ .type = .workflow, .argv = &.{.{ .string = "printf" }} } }},
-    }));
-}
-
-test "extension definitions require unique IDs and valid selection" {
-    const testing = std.testing;
-    try testing.expectError(error.DuplicateElementId, validate(.{
-        .id = "tools",
-        .title = "Gizmo tools",
-        .elements = &.{ .{ .id = "same", .type = .entry }, .{ .id = "same", .type = .label } },
-    }));
-    try testing.expectError(error.InvalidSelection, validate(.{
-        .id = "tools",
-        .title = "Gizmo tools",
-        .elements = &.{.{ .id = "select", .type = .selection, .options = &.{"one"}, .selected = 1 }},
-    }));
-}
-
-test "extension merge patch replaces arrays and removes fields" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const original = (try std.json.parseFromSlice(Value, alloc, "{\"title\":\"old\",\"elements\":[1,2],\"remove\":true}", .{})).value;
-    const patch = (try std.json.parseFromSlice(Value, alloc, "{\"title\":\"new\",\"elements\":[3],\"remove\":null}", .{})).value;
-    const result = try mergePatch(alloc, original, patch, 0);
-    try testing.expectEqualStrings("new", result.object.get("title").?.string);
-    try testing.expectEqual(@as(usize, 1), result.object.get("elements").?.array.items.len);
-    try testing.expectEqual(@as(i64, 3), result.object.get("elements").?.array.items[0].integer);
-    try testing.expect(result.object.get("remove") == null);
 }
 
 test "native workflow output truncation preserves UTF-8" {

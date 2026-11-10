@@ -1491,10 +1491,10 @@ jobs:
         run: nix build .#ghostty-${{ matrix.variant.optimize }}
 
       - name: Check version
-        run: result/bin/ghostty +version | grep -q '${{ matrix.variant.version }}'
+        run: result/bin/gizmo +version | grep -q '${{ matrix.variant.version }}'
 
       - name: Check symbols
-        run: nm result/bin/.ghostty-wrapped 2>&1 | grep -q '${{ matrix.variant.symbols }}'
+        run: nm result/bin/.gizmo-wrapped 2>&1 | grep -q '${{ matrix.variant.symbols }}'
 
   build-nix-lib-vt:
     strategy:

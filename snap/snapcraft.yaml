@@ -18,10 +18,10 @@ platforms:
   arm64:
 
 apps:
-  ghostty:
-    command: bin/ghostty
+  gizmo:
+    command: bin/gizmo
     command-chain: [app/launcher]
-    completer: share/bash-completion/completions/ghostty.bash
+    completer: share/bash-completion/completions/gizmo.bash
     desktop: share/applications/com.mitchellh.ghostty.desktop
     #refresh-mode: ignore-running # Store rejects this, needs fix in review-tools
     environment:

@@ -39,6 +39,8 @@ const inspectorpkg = @import("inspector/main.zig");
 const SurfaceMouse = @import("surface_mouse.zig");
 const ProcessInfo = @import("pty.zig").ProcessInfo;
 
+pub const ProgramStatus = @import("terminal/ProgramStatus.zig");
+
 const log = std.log.scoped(.surface);
 
 // The renderer implementation to use.
@@ -1012,6 +1014,33 @@ pub fn needsConfirmQuit(self: *Surface) bool {
     };
 }
 
+/// Return caller-owned, ID-sorted OSC 7501 records. These methods acquire the
+/// renderer/IO mutex internally; callers must not already hold that mutex.
+pub fn programStatusSnapshot(self: *Surface, alloc: Allocator) Allocator.Error!ProgramStatus.Snapshot {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.io.terminal.program_status.snapshot(alloc);
+}
+
+pub fn programStatusDetails(self: *Surface, alloc: Allocator, id: []const u8) Allocator.Error!?ProgramStatus.Record {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.io.terminal.program_status.details(alloc, id);
+}
+
+pub fn programStatusSummary(self: *Surface, alloc: Allocator) Allocator.Error!?ProgramStatus.Record {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.io.terminal.program_status.summary(alloc);
+}
+
+/// Runs on the app thread, never while the renderer/IO mutex is held.
+fn programStatusChanged(self: *Surface) void {
+    if (comptime @import("build_config.zig").app_runtime == .gtk) {
+        self.rt_surface.gobj().refreshProgramStatus();
+    }
+}
+
 /// Called from the app thread to handle mailbox messages to our specific
 /// surface.
 pub fn handleMessage(self: *Surface, msg: Message) !void {
@@ -1186,6 +1215,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status_changed => self.programStatusChanged(),
+
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();
@@ -1297,6 +1328,12 @@ fn selectionScrollTick(self: *Surface) !void {
 fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // Mark our flag that we exited immediately
     self.child_exited = true;
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        _ = self.io.terminal.program_status.endCommand(self.alloc);
+    }
+    self.programStatusChanged();
 
     // If our runtime was below some threshold then we assume that this
     // was an abnormal exit and we show an error message.
@@ -5051,9 +5088,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .reset => {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
-            self.renderer_state.terminal.fullReset();
+            {
+                self.renderer_state.mutex.lockUncancelable(global.io());
+                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.terminal.fullReset();
+            }
+            self.programStatusChanged();
         },
 
         .start_search => {

@@ -21,7 +21,7 @@ body:
         > **Not sure what information to include?**
         > Here are some recommendations:
         > - **Input issues:** include your keyboard layout, a screenshot of logged keystrokes from the terminal inspector's "Keyboard" tab (Linux: <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>i</kbd>; MacOS: <kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>i</kbd>), input method, Linux input method engine (IBus, Fcitx 5, or none) and its version.
-        > - **Font issues:** include the problematic character(s), the output of `ghostty +show-face` for these character(s), and if they work in other applications.
+        > - **Font issues:** include the problematic character(s), the output of `gizmo +show-face` for these character(s), and if they work in other applications.
         > - **Terminal emulation issues (including image rendering issues):** attach an [asciinema](https://docs.asciinema.org/getting-started/) cast file, shell script, or text file for reproduction.
         > - **Renderer issues:** (Linux) include your OpenGL version, graphics card, driver version.
         > - **Crashes:** (macOS) include the [Sentry UUID](https://github.com/ghostty-org/ghostty?tab=readme-ov-file#crash-reports); (Linux) try to reproduce using a debug build and provide the stack trace.
@@ -63,12 +63,12 @@ body:
     attributes:
       label: Ghostty Logs
       description: |
-        Provide any captured Ghostty logs or stacktraces during your issue reproduction in this field.  On Linux, logs can be found by running `ghostty` from the command-line; on macOS, logs can be viewed with `sudo log stream --level debug --predicate 'subsystem=="com.mitchellh.ghostty"'` from another terminal emulator.
+        Provide any captured Ghostty logs or stacktraces during your issue reproduction in this field.  On Linux, logs can be found by running `gizmo` from the command-line; on macOS, logs can be viewed with `sudo log stream --level debug --predicate 'subsystem=="com.mitchellh.ghostty"'` from another terminal emulator.
       render: text
   - type: textarea
     attributes:
       label: Ghostty Version
-      description: Paste the output of `ghostty +version` here.
+      description: Paste the output of `gizmo +version` here.
       placeholder: |
         Ghostty 1.1.3
 

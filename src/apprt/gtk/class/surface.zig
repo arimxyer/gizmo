@@ -34,6 +34,7 @@ const ChildExited = @import("surface_child_exited.zig").SurfaceChildExited;
 const ClipboardConfirmationDialog = @import("clipboard_confirmation_dialog.zig").ClipboardConfirmationDialog;
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
 const Window = @import("window.zig").Window;
+const Tab = @import("tab.zig").Tab;
 const InspectorWindow = @import("inspector_window.zig").InspectorWindow;
 const SplitTree = @import("split_tree.zig").SplitTree;
 const SurfaceScrolledWindow = @import("surface_scrolled_window.zig").SurfaceScrolledWindow;
@@ -67,6 +68,26 @@ pub const Surface = extern struct {
     pub const Tree = datastruct.SplitTree(Self);
 
     pub const properties = struct {
+        pub const @"program-status" = struct {
+            pub const name = "program-status";
+            const impl = gobject.ext.defineProperty(name, Self, ?[:0]const u8, .{
+                .default = "none",
+                .accessor = gobject.ext.typedAccessor(Self, ?[:0]const u8, .{
+                    .getter = getProgramStatus,
+                }),
+            });
+        };
+
+        pub const @"program-status-message" = struct {
+            pub const name = "program-status-message";
+            const impl = gobject.ext.defineProperty(name, Self, ?[:0]const u8, .{
+                .default = "",
+                .accessor = gobject.ext.typedAccessor(Self, ?[:0]const u8, .{
+                    .getter = getProgramStatusMessage,
+                }),
+            });
+        };
+
         /// This property is set to true when the bell is ringing. Note that
         /// this property will only emit a changed signal when there is a
         /// full state change. If a bell is ringing and another bell event
@@ -623,6 +644,9 @@ pub const Surface = extern struct {
         /// The title of this surface, if any has been set.
         title: ?[:0]const u8 = null,
 
+        program_status: ?CoreSurface.ProgramStatus.State = null,
+        program_status_message: ?[:0]const u8 = null,
+
         /// The manually overridden title of this surface from `promptTitle`.
         title_override: ?[:0]const u8 = null,
 
@@ -1059,6 +1083,51 @@ pub const Surface = extern struct {
             page_size, // page_increment: amount to scroll on page up/down
             page_size, // page_size: size of visible area
         );
+    }
+
+    pub fn getProgramStatusState(self: *Self) ?CoreSurface.ProgramStatus.State {
+        return self.private().program_status;
+    }
+
+    pub fn getProgramStatus(self: *Self) ?[:0]const u8 {
+        return if (self.getProgramStatusState()) |state| @tagName(state) else "none";
+    }
+
+    pub fn getProgramStatusMessage(self: *Self) ?[:0]const u8 {
+        return self.private().program_status_message orelse "";
+    }
+
+    /// Called only by the core's app-thread mailbox dispatch. Status is
+    /// presentation data: no report can execute an action or grant permission.
+    pub fn refreshProgramStatus(self: *Self) void {
+        const core_surface = self.core() orelse return;
+        const alloc = Application.default().allocator();
+        var summary = core_surface.programStatusSummary(alloc) catch |err| {
+            log.warn("unable to snapshot program status err={}", .{err});
+            return;
+        };
+        defer if (summary) |*record| record.deinit(alloc);
+        const state = if (summary) |record| record.state else null;
+        const text = if (summary) |record| record.msg orelse record.title orelse "" else "";
+        const message = if (text.len > 0)
+            CoreSurface.ProgramStatus.displayText(alloc, text) catch |err| {
+                log.warn("unable to display program status err={}", .{err});
+                return;
+            }
+        else
+            null;
+        const priv = self.private();
+        const state_changed = priv.program_status != state;
+        const message_changed = !std.mem.eql(u8, priv.program_status_message orelse "", message orelse "");
+        if (!state_changed and !message_changed) {
+            if (message) |value| alloc.free(value);
+            return;
+        }
+        priv.program_status = state;
+        if (priv.program_status_message) |old| alloc.free(old);
+        priv.program_status_message = message;
+        if (state_changed) self.as(gobject.Object).notifyByPspec(properties.@"program-status".impl.param_spec);
+        if (message_changed) self.as(gobject.Object).notifyByPspec(properties.@"program-status-message".impl.param_spec);
     }
 
     /// Set the current progress report state.
@@ -1969,6 +2038,10 @@ pub const Surface = extern struct {
     fn finalize(self: *Self) callconv(.c) void {
         const alloc = Application.default().allocator();
         const priv = self.private();
+        if (priv.program_status_message) |message| {
+            alloc.free(message);
+            priv.program_status_message = null;
+        }
         if (priv.core_surface) |v| {
             // Remove ourselves from the list of known surfaces in the app.
             // We do this before deinit in case a callback triggers
@@ -4024,6 +4097,8 @@ pub const Surface = extern struct {
                 properties.@"mouse-hidden".impl,
                 properties.@"mouse-hover-url".impl,
                 properties.pwd.impl,
+                properties.@"program-status".impl,
+                properties.@"program-status-message".impl,
                 properties.title.impl,
                 properties.@"title-override".impl,
                 properties.zoom.impl,

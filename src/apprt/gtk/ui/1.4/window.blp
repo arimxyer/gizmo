@@ -32,206 +32,273 @@ template $GhosttyWindow: Adw.ApplicationWindow {
     show-start-title-buttons: bind template.decorated;
     show-end-title-buttons: bind template.decorated;
 
-    Adw.ToolbarView toolbar {
-      top-bar-style: bind template.toolbar-style;
-      bottom-bar-style: bind template.toolbar-style;
-
-      [top]
-      Adw.HeaderBar {
-        visible: bind template.headerbar-visible;
-
-        title-widget: Adw.WindowTitle {
-          title: bind $computed_title(template.config, template.title, template.title-override) as <string>;
-          // Blueprint auto-formatter won't let me split this into multiple
-          // lines. Let me explain myself. All parameters to a closure are used
-          // as notifications to recompute the value of the closure. All
-          // elements of a property chain are also subscribed to for changes.
-          // This one long, ugly line saves us from manually building up this
-          // massive notify chain in code.
-          subtitle: bind $computed_subtitle(
-            template.config,
-            tab_view.selected-page.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd
-            ) as <string>;
-        };
-
-        [start]
-        Adw.SplitButton {
-          clicked => $new_tab();
-          icon-name: "tab-new-symbolic";
-          tooltip-text: _("New Tab");
-          dropdown-tooltip: _("New Split");
-          menu-model: split_menu;
-          can-focus: false;
-          focus-on-click: false;
+    Gtk.Overlay {
+      Gtk.Box {
+        Gtk.Box {
+          width-request: 48;
+          visible: bind template.sidebar-visible;
         }
 
-        [end]
-        Gtk.Box {
-          Gtk.ToggleButton {
-            icon-name: "view-grid-symbolic";
-            tooltip-text: _("View Open Tabs");
-            active: bind tab_overview.open bidirectional;
-            can-focus: false;
-            focus-on-click: false;
+        Adw.ToolbarView toolbar {
+          top-bar-style: bind template.toolbar-style;
+          bottom-bar-style: bind template.toolbar-style;
+          hexpand: true;
+          vexpand: true;
+
+          [top]
+          Adw.HeaderBar {
+            visible: bind template.headerbar-visible;
+
+            title-widget: Adw.WindowTitle {
+              title: bind $computed_title(template.config, template.title, template.title-override) as <string>;
+              // Blueprint auto-formatter won't let me split this into multiple
+              // lines. Let me explain myself. All parameters to a closure are used
+              // as notifications to recompute the value of the closure. All
+              // elements of a property chain are also subscribed to for changes.
+              // This one long, ugly line saves us from manually building up this
+              // massive notify chain in code.
+              subtitle: bind $computed_subtitle(
+                template.config,
+                tab_view.selected-page.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd
+                ) as <string>;
+            };
+
+            [start]
+            Adw.SplitButton {
+              visible: bind template.headerbar-new-tab-visible;
+              clicked => $new_tab();
+              icon-name: "tab-new-symbolic";
+              tooltip-text: _("New Tab");
+              dropdown-tooltip: _("New Split");
+              menu-model: split_menu;
+              can-focus: false;
+              focus-on-click: false;
+            }
+
+            [end]
+            Gtk.Box {
+              Gtk.ToggleButton {
+                icon-name: "view-grid-symbolic";
+                tooltip-text: _("View Open Tabs");
+                active: bind tab_overview.open bidirectional;
+                can-focus: false;
+                focus-on-click: false;
+              }
+
+              Gtk.MenuButton {
+                notify::active => $notify_menu_active();
+                icon-name: "open-menu-symbolic";
+                menu-model: main_menu;
+                tooltip-text: _("Main Menu");
+                can-focus: false;
+              }
+            }
           }
 
-          Gtk.MenuButton {
-            notify::active => $notify_menu_active();
-            icon-name: "open-menu-symbolic";
-            menu-model: main_menu;
-            tooltip-text: _("Main Menu");
-            can-focus: false;
+          [top]
+          Adw.TabBar tab_bar {
+            autohide: bind template.tabs-autohide;
+            expand-tabs: bind template.tabs-wide;
+            inverted: bind template.tabs-inverted;
+            view: tab_view;
+            visible: bind template.tabs-visible;
+
+            [start]
+            Gtk.Box {
+              orientation: horizontal;
+              visible: bind $titlebar_style_is_tabs(template.titlebar-style) as <bool>;
+
+              Gtk.WindowControls {
+                side: start;
+              }
+
+              Adw.SplitButton {
+                styles [
+                  "flat",
+                ]
+
+                clicked => $new_tab();
+                icon-name: "tab-new-symbolic";
+                tooltip-text: _("New Tab");
+                dropdown-tooltip: _("New Split");
+                menu-model: split_menu;
+                can-focus: false;
+                focus-on-click: false;
+              }
+            }
+
+            [end]
+            Gtk.Box {
+              orientation: horizontal;
+              visible: bind $titlebar_style_is_tabs(template.titlebar-style) as <bool>;
+
+              Gtk.ToggleButton {
+                styles [
+                  "flat",
+                ]
+
+                icon-name: "view-grid-symbolic";
+                tooltip-text: _("View Open Tabs");
+                active: bind tab_overview.open bidirectional;
+                can-focus: false;
+                focus-on-click: false;
+              }
+
+              Gtk.MenuButton {
+                styles [
+                  "flat",
+                ]
+
+                notify::active => $notify_menu_active();
+                icon-name: "open-menu-symbolic";
+                menu-model: main_menu;
+                tooltip-text: _("Main Menu");
+                can-focus: false;
+              }
+
+              Gtk.WindowControls {
+                side: end;
+              }
+            }
+          }
+
+          Box {
+            orientation: vertical;
+
+            $GhosttyDebugWarning {
+              visible: bind template.debug;
+            }
+
+            Adw.ToastOverlay toast_overlay {
+              hexpand: true;
+              vexpand: true;
+
+              Adw.TabView tab_view {
+                notify::n-pages => $notify_n_pages();
+                notify::selected-page => $notify_selected_page();
+                close-page => $close_page();
+                page-attached => $page_attached();
+                page-detached => $page_detached();
+                create-window => $tab_create_window();
+                setup-menu => $setup_tab_menu();
+                menu-model: tab_context_menu;
+                shortcuts: none;
+              }
+            }
           }
         }
       }
 
-      [top]
-      Adw.TabBar tab_bar {
-        autohide: bind template.tabs-autohide;
-        expand-tabs: bind template.tabs-wide;
-        inverted: bind template.tabs-inverted;
-        view: tab_view;
-        visible: bind template.tabs-visible;
+      [overlay]
+      Gtk.Box tab_sidebar {
+        orientation: vertical;
+        halign: start;
+        valign: fill;
+        width-request: 48;
+        visible: bind template.sidebar-visible;
 
-        [start]
+        styles [
+          "gizmo-sidebar",
+          "sidebar",
+        ]
+
         Gtk.Box {
-          orientation: horizontal;
-          visible: bind $titlebar_style_is_tabs(template.titlebar-style) as <bool>;
+          styles [
+            "gizmo-sidebar-header",
+          ]
 
-          Gtk.WindowControls {
-            side: start;
+          Gtk.Button {
+            icon-name: "sidebar-show-symbolic";
+            action-name: "win.toggle-sidebar";
+            tooltip-text: _("Expand or Collapse Tabs");
+            halign: start;
+
+            styles [
+              "flat",
+              "gizmo-sidebar-toggle",
+            ]
+          }
+
+          Gtk.Label {
+            label: _("Tabs");
+            visible: bind template.sidebar-expanded;
+            hexpand: true;
+            xalign: 0;
+
+            styles [
+              "heading",
+            ]
           }
 
           Adw.SplitButton {
-            styles [
-              "flat",
-            ]
-
+            visible: bind template.sidebar-expanded;
             clicked => $new_tab();
-            icon-name: "tab-new-symbolic";
+            label: _("New Tab");
             tooltip-text: _("New Tab");
             dropdown-tooltip: _("New Split");
             menu-model: split_menu;
             can-focus: false;
             focus-on-click: false;
+            valign: center;
+
+            styles [
+              "flat",
+              "gizmo-sidebar-new-tab",
+            ]
           }
         }
 
-        [end]
-        Gtk.Box {
-          orientation: horizontal;
-          visible: bind $titlebar_style_is_tabs(template.titlebar-style) as <bool>;
+        Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+          vscrollbar-policy: automatic;
+          vexpand: true;
 
-          Gtk.ToggleButton {
+          Gtk.ListBox tab_list {
+            selection-mode: single;
+            activate-on-single-click: false;
+            tooltip-text: _("Tabs");
+
+            styles [
+              "navigation-sidebar",
+              "gizmo-tab-list",
+            ]
+          }
+        }
+
+        Gtk.Box {
+          orientation: vertical;
+          visible: bind template.sidebar-controls-visible;
+
+          Gtk.Button {
+            visible: bind template.headerbar-new-tab-visible;
+            icon-name: "tab-new-symbolic";
+            action-name: "win.new-tab";
+            tooltip-text: _("New Tab");
+
             styles [
               "flat",
             ]
+          }
 
+          Gtk.ToggleButton {
             icon-name: "view-grid-symbolic";
-            tooltip-text: _("View Open Tabs");
             active: bind tab_overview.open bidirectional;
-            can-focus: false;
-            focus-on-click: false;
+            tooltip-text: _("View Open Tabs");
+
+            styles [
+              "flat",
+            ]
           }
 
           Gtk.MenuButton {
-            styles [
-              "flat",
-            ]
-
-            notify::active => $notify_menu_active();
             icon-name: "open-menu-symbolic";
             menu-model: main_menu;
             tooltip-text: _("Main Menu");
-            can-focus: false;
-          }
-
-          Gtk.WindowControls {
-            side: end;
-          }
-        }
-      }
-
-      Box {
-        orientation: vertical;
-
-        $GhosttyDebugWarning {
-          visible: bind template.debug;
-        }
-
-        Gtk.Box {
-          orientation: horizontal;
-          vexpand: true;
-
-          Gtk.Box tab_sidebar {
-            orientation: vertical;
-            width-request: 240;
-            hexpand: false;
-            visible: bind template.sidebar-visible;
+            notify::active => $notify_menu_active();
 
             styles [
-              "sidebar",
+              "flat",
             ]
-
-            Gtk.Box {
-              spacing: 4;
-              margin-top: 6;
-              margin-bottom: 6;
-              margin-start: 6;
-              margin-end: 6;
-
-              Gtk.Button {
-                label: _("New Tab");
-                action-name: "win.new-tab";
-                tooltip-text: _("New Tab");
-                hexpand: true;
-              }
-
-              Gtk.ToggleButton {
-                label: _("All Tabs");
-                tooltip-text: _("View Open Tabs");
-                active: bind tab_overview.open bidirectional;
-              }
-
-              Gtk.MenuButton {
-                icon-name: "open-menu-symbolic";
-                menu-model: main_menu;
-                tooltip-text: _("Main Menu");
-                notify::active => $notify_menu_active();
-              }
-            }
-
-            Gtk.ScrolledWindow {
-              hscrollbar-policy: never;
-              vscrollbar-policy: automatic;
-              vexpand: true;
-
-              Gtk.ListBox tab_list {
-                selection-mode: single;
-                tooltip-text: _("Gizmo Tabs");
-
-                styles [
-                  "navigation-sidebar",
-                ]
-              }
-            }
-          }
-
-          Adw.ToastOverlay toast_overlay {
-            hexpand: true;
-            vexpand: true;
-
-            Adw.TabView tab_view {
-              notify::n-pages => $notify_n_pages();
-              notify::selected-page => $notify_selected_page();
-              close-page => $close_page();
-              page-attached => $page_attached();
-              page-detached => $page_detached();
-              create-window => $tab_create_window();
-              setup-menu => $setup_tab_menu();
-              menu-model: tab_context_menu;
-              shortcuts: none;
-            }
           }
         }
       }
@@ -326,6 +393,29 @@ menu main_menu {
       item {
         label: _("Switch Tab Orientation");
         action: "win.toggle-tabs-orientation";
+      }
+
+      item {
+        label: _("Compact Sidebar");
+        action: "win.set-sidebar-state";
+        target: "compact";
+      }
+
+      item {
+        label: _("Expanded Sidebar");
+        action: "win.set-sidebar-state";
+        target: "expanded";
+      }
+
+      item {
+        label: _("Hide Sidebar");
+        action: "win.set-sidebar-state";
+        target: "hidden";
+      }
+
+      item {
+        label: _("Focus Tab List");
+        action: "win.focus-tab-list";
       }
     }
   }
@@ -423,5 +513,35 @@ menu tab_context_menu {
   item {
     label: _("Change Tab Title…");
     action: "win.prompt-context-tab-title";
+  }
+
+  item {
+    label: _("Move Tab Up");
+    action: "win.context-tab-operation";
+    target: "up";
+  }
+
+  item {
+    label: _("Move Tab Down");
+    action: "win.context-tab-operation";
+    target: "down";
+  }
+
+  item {
+    label: _("Move Tab to New Window");
+    action: "win.context-tab-operation";
+    target: "detach";
+  }
+
+  item {
+    label: _("Close Tab");
+    action: "win.context-tab-operation";
+    target: "close";
+  }
+
+  item {
+    label: _("Close Other Tabs");
+    action: "win.context-tab-operation";
+    target: "close-other";
   }
 }
