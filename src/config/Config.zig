@@ -3808,15 +3808,28 @@ else
 /// under macOS.
 @"gtk-titlebar": bool = true,
 
-/// Determines the side of the screen that the GTK tab bar will stick to.
-/// Top, bottom, and hidden are supported. The default is top.
+/// Determines the location of the horizontal GTK tab bar: `top` or `bottom`.
+/// The default is `top`. This setting does not move the vertical tab sidebar.
 ///
-/// When `hidden` is set, a tab button displaying the number of tabs will appear
-/// in the title bar. It has the ability to open a tab overview for displaying
-/// tabs. Alternatively, you can use the `toggle_tab_overview` action in a
-/// keybind if your window doesn't have a title bar, or you can switch tabs
-/// with keybinds.
+/// Use `window-show-tab-bar = never` to hide either tab presentation.
+/// The legacy value `hidden` also sets `window-show-tab-bar = never`.
+/// Use `toggle_tab_overview` or tab keybinds when tabs are hidden.
 @"gtk-tabs-location": GtkTabsLocation = .top,
+
+/// Selects Gizmo's GTK tab presentation: `horizontal` or `vertical`.
+/// The default is `horizontal`. Vertical tabs use a sidebar on the left.
+/// Both presentations use the same tabs and terminal surfaces.
+///
+/// Config reload applies this value to all existing windows and clears
+/// their session-only orientation overrides. The window menu and GTK actions
+/// `win.toggle-tabs-orientation` and `win.set-tabs-orientation` change only
+/// the current window. The set action takes `horizontal` or `vertical`.
+/// These actions do not save changes to the config file.
+///
+/// `window-show-tab-bar` controls visibility in both orientations.
+/// `gtk-tabs-location` controls only the horizontal presentation.
+/// This setting has no effect on macOS.
+@"gtk-tabs-orientation": GtkTabsOrientation = .horizontal,
 
 /// If true, the close button of each tab is shown at the start of the tab
 /// (the left, in left-to-right languages) and the tab's icon at the end.
@@ -9346,6 +9359,12 @@ pub const GtkSingleInstance = enum {
 pub const GtkTabsLocation = enum {
     top,
     bottom,
+};
+
+/// See gtk-tabs-orientation
+pub const GtkTabsOrientation = enum {
+    horizontal,
+    vertical,
 };
 
 /// See gtk-toolbar-style

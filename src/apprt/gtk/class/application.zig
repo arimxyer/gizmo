@@ -47,6 +47,8 @@ const GlobalShortcuts = @import("global_shortcuts.zig").GlobalShortcuts;
 const OpenURI = @import("../portal.zig").OpenURI;
 const media = @import("../media.zig");
 const Overrides = @import("Overrides.zig");
+const AgentControl = @import("../agent_control.zig");
+const AgentExtensions = @import("../agent_extensions.zig");
 
 const log = std.log.scoped(.gtk_ghostty_application);
 
@@ -238,6 +240,8 @@ pub const Application = extern struct {
         // on the first audio bell and rebuilt when `bell-audio-path` changes;
         // unref'd on dispose. See ringBell and media.zig.
         bell_media: ?*gtk.MediaFile = null,
+
+        agent_control: ?*AgentControl = null,
 
         pub var offset: c_int = 0;
     };
@@ -458,6 +462,11 @@ pub const Application = extern struct {
     pub fn deinit(self: *Self) void {
         const alloc = self.allocator();
         const priv: *Private = self.private();
+        if (priv.agent_control) |control| {
+            control.deinit();
+            priv.agent_control = null;
+        }
+        AgentExtensions.deinit(self);
         priv.config.unref();
         priv.winproto.deinit();
         priv.open_uri.deinit();
@@ -843,6 +852,10 @@ pub const Application = extern struct {
     /// Returns the apprt application associated with this application.
     pub fn rt(self: *Self) *ApprtApp {
         return self.private().rt_app;
+    }
+
+    pub fn agentControl(self: *Self) ?*AgentControl {
+        return self.private().agent_control;
     }
 
     /// Returns the app winproto implementation.
@@ -1357,6 +1370,11 @@ pub const Application = extern struct {
         // Setup our action map
         self.startupActionMap();
 
+        self.private().agent_control = AgentControl.init(self) catch |err| control: {
+            log.warn("Gizmo agent control unavailable: {s}", .{@errorName(err)});
+            break :control null;
+        };
+
         // Setup our global shortcuts
         self.startupGlobalShortcuts();
 
@@ -1553,6 +1571,11 @@ pub const Application = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        if (priv.agent_control) |control| {
+            control.deinit();
+            priv.agent_control = null;
+        }
+        AgentExtensions.deinit(self);
         if (priv.config_errors_dialog.get()) |diag| {
             diag.close();
             diag.unref(); // strong ref from get()
@@ -2872,6 +2895,7 @@ const Action = struct {
             ),
             .surface => |core| try core.updateConfig(config.get()),
         }
+        if (!opts.soft and target == .app) AgentControl.resetTabsOrientations(self);
     }
 
     pub fn render(target: apprt.Target) void {

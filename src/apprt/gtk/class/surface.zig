@@ -1599,6 +1599,12 @@ pub const Surface = extern struct {
         return self.private().cursor_pos;
     }
 
+    /// Set the cached cursor position in surface-relative device pixels.
+    /// Callers must also notify CoreSurface.cursorPosCallback.
+    pub fn setCursorPos(self: *Self, pos: apprt.CursorPos) void {
+        self.private().cursor_pos = pos;
+    }
+
     pub fn defaultTermioEnv(self: *Self) !std.process.Environ.Map {
         const app = Application.default();
         const alloc = app.allocator();

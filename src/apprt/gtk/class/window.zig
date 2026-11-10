@@ -30,6 +30,7 @@ const CommandPalette = @import("command_palette.zig").CommandPalette;
 const WeakRef = @import("../weak_ref.zig").WeakRef;
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
 const Overrides = @import("Overrides.zig");
+const vertical_tabs = @import("../vertical_tabs.zig");
 
 const log = std.log.scoped(.gtk_ghostty_window);
 
@@ -210,6 +211,16 @@ pub const Window = extern struct {
             );
         };
 
+        pub const @"sidebar-visible" = struct {
+            pub const name = "sidebar-visible";
+            const impl = gobject.ext.defineProperty(name, Self, bool, .{
+                .default = false,
+                .accessor = gobject.ext.typedAccessor(Self, bool, .{
+                    .getter = Self.getSidebarVisible,
+                }),
+            });
+        };
+
         pub const @"toolbar-style" = struct {
             pub const name = "toolbar-style";
             const impl = gobject.ext.defineProperty(
@@ -256,6 +267,10 @@ pub const Window = extern struct {
         /// config on a per-window basis.
         window_decoration: ?configpkg.WindowDecoration = null,
 
+        /// A per-window, session-only override. Config reload clears it.
+        tabs_orientation: ?configpkg.Config.GtkTabsOrientation = null,
+        vertical_tabs_initialized: bool = false,
+
         /// Binding group for our active tab.
         tab_bindings: *gobject.BindingGroup,
 
@@ -298,6 +313,8 @@ pub const Window = extern struct {
         tab_overview: *adw.TabOverview,
         tab_bar: *adw.TabBar,
         tab_view: *adw.TabView,
+        tab_sidebar: *gtk.Box,
+        tab_list: *gtk.ListBox,
         toolbar: *adw.ToolbarView,
         toast_overlay: *adw.ToastOverlay,
 
@@ -362,6 +379,8 @@ pub const Window = extern struct {
 
         // Initialize our actions
         self.initActionMap();
+        vertical_tabs.init(priv.tab_list, priv.tab_view);
+        priv.vertical_tabs_initialized = true;
 
         // Start states based on config.
         if (config.maximize) self.as(gtk.Window).maximize();
@@ -395,6 +414,8 @@ pub const Window = extern struct {
             .init("about", actionAbout, null),
             .init("close", actionClose, null),
             .init("close-tab", actionCloseTab, s_variant_type),
+            .initStateful("set-tabs-orientation", actionSetTabsOrientation, s_variant_type, glib.Variant.newString("horizontal")),
+            .init("toggle-tabs-orientation", actionToggleTabsOrientation, null),
             .init("new-tab", actionNewTab, null),
             .init("new-window", actionNewWindow, null),
             .init("prompt-surface-title", actionPromptSurfaceTitle, null),
@@ -702,6 +723,7 @@ pub const Window = extern struct {
             "tabs-inverted",
             "tabs-visible",
             "tabs-wide",
+            "sidebar-visible",
             "toolbar-style",
             "titlebar-style",
         }) |key| {
@@ -724,6 +746,11 @@ pub const Window = extern struct {
         switch (config.@"gtk-tabs-location") {
             .top => priv.toolbar.addTopBar(priv.tab_bar.as(gtk.Widget)),
             .bottom => priv.toolbar.addBottomBar(priv.tab_bar.as(gtk.Widget)),
+        }
+        if (self.as(gio.ActionMap).lookupAction("set-tabs-orientation")) |base| {
+            if (gobject.ext.cast(gio.SimpleAction, base)) |action| {
+                action.setState(glib.Variant.newString(@tagName(self.getTabsOrientation()).ptr));
+            }
         }
 
         // Do our window-protocol specific appearance sync.
@@ -1091,8 +1118,8 @@ pub const Window = extern struct {
         }
 
         return switch (config.@"gtk-titlebar-style") {
-            // If the titlebar style is tabs never show the titlebar.
-            .tabs => false,
+            // Vertical tabs need the normal header's window controls.
+            .tabs => self.getTabsOrientation() == .vertical and config.@"gtk-titlebar",
 
             // If the titlebar style is native show the titlebar if configured
             // to do so.
@@ -1123,6 +1150,32 @@ pub const Window = extern struct {
     }
 
     fn getTabsVisible(self: *Self) bool {
+        return self.getTabsOrientation() == .horizontal and self.getTabStripVisible();
+    }
+
+    fn getSidebarVisible(self: *Self) bool {
+        return self.getTabsOrientation() == .vertical and
+            self.getTabStripVisible() and
+            (!self.getTabsAutohide() or self.private().tab_view.getNPages() > 1);
+    }
+
+    /// The effective orientation can be inspected through the state of
+    /// win.set-tabs-orientation. This never replaces the TabView or surfaces.
+    pub fn getTabsOrientation(self: *Self) configpkg.Config.GtkTabsOrientation {
+        const priv = self.private();
+        if (priv.tabs_orientation) |value| return value;
+        const config = if (priv.config) |value| value.get() else return .horizontal;
+        return config.@"gtk-tabs-orientation";
+    }
+
+    /// Explicit configuration updates reset session overrides; soft theme
+    /// changes preserve the user's current tab presentation.
+    pub fn resetTabsOrientation(self: *Self) void {
+        self.private().tabs_orientation = null;
+        self.syncAppearance();
+    }
+
+    fn getTabStripVisible(self: *Self) bool {
         const priv = self.private();
         const config = if (priv.config) |v| v.get() else return true;
 
@@ -1441,6 +1494,10 @@ pub const Window = extern struct {
         }
 
         priv.tab_bindings.setSource(null);
+        if (priv.vertical_tabs_initialized) {
+            vertical_tabs.deinit(priv.tab_list, priv.tab_view);
+            priv.vertical_tabs_initialized = false;
+        }
 
         gtk.Widget.disposeTemplate(
             self.as(gtk.Widget),
@@ -1703,6 +1760,7 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const priv = self.private();
+        if (priv.vertical_tabs_initialized) vertical_tabs.syncSelection(priv.tab_list, priv.tab_view);
 
         // Always reset our binding source in case we have no pages.
         priv.tab_bindings.setSource(null);
@@ -1845,6 +1903,7 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const priv = self.private();
+        self.as(gobject.Object).notifyByPspec(properties.@"sidebar-visible".impl.param_spec);
         if (priv.tab_view.getNPages() == 0) {
             // If we have no pages left then we want to close window.
 
@@ -2036,6 +2095,32 @@ pub const Window = extern struct {
             website,
             @as(?*anyopaque, null),
         );
+    }
+
+    fn actionSetTabsOrientation(
+        _: *gio.SimpleAction,
+        parameter: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const value = parameter orelse return;
+        const orientation = std.meta.stringToEnum(
+            configpkg.Config.GtkTabsOrientation,
+            std.mem.span(value.getString(null)),
+        ) orelse return;
+        self.private().tabs_orientation = orientation;
+        self.syncAppearance();
+    }
+
+    fn actionToggleTabsOrientation(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        self.private().tabs_orientation = switch (self.getTabsOrientation()) {
+            .horizontal => .vertical,
+            .vertical => .horizontal,
+        };
+        self.syncAppearance();
     }
 
     fn actionClose(
@@ -2333,6 +2418,7 @@ pub const Window = extern struct {
                 properties.@"tabs-inverted".impl,
                 properties.@"tabs-visible".impl,
                 properties.@"tabs-wide".impl,
+                properties.@"sidebar-visible".impl,
                 properties.@"toolbar-style".impl,
                 properties.@"titlebar-style".impl,
                 properties.@"title-override".impl,
@@ -2342,6 +2428,8 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("tab_overview", .{});
             class.bindTemplateChildPrivate("tab_bar", .{});
             class.bindTemplateChildPrivate("tab_view", .{});
+            class.bindTemplateChildPrivate("tab_sidebar", .{});
+            class.bindTemplateChildPrivate("tab_list", .{});
             class.bindTemplateChildPrivate("toolbar", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
 

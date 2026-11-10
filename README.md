@@ -2,10 +2,10 @@
 <h1>
 <p align="center">
   <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Logo" width="128">
-  <br>Ghostty
+  <br>Gizmo
 </h1>
   <p align="center">
-    Fast, native, feature-rich terminal emulator pushing modern features.
+    A moldable Linux terminal, based on Ghostty.
     <br />
     A native GUI or embeddable library via <code>libghostty</code>.
     <br />
@@ -23,10 +23,12 @@
 
 ## About
 
-Ghostty is a terminal emulator that differentiates itself by being
-fast, feature-rich, and native. While there are many excellent terminal
-emulators available, they all force you to choose between speed,
-features, or native UIs. Ghostty provides all three.
+Gizmo is a Linux fork of [Ghostty](https://github.com/ghostty-org/ghostty).
+It adds authenticated local agent control, custom native panels, tool workflows,
+and switchable horizontal or vertical tabs.
+
+The build currently retains Ghostty's executable name and default application
+identity. The shared terminal engine and upstream platform code remain intact.
 
 **`libghostty`** is a cross-platform, zero-dependency C and Zig library
 for building terminal emulators or utilizing terminal functionality
@@ -37,6 +39,160 @@ example or the [`examples` directory](https://github.com/ghostty-org/ghostty/tre
 for smaller examples of using `libghostty` in C and Zig.
 
 For more details, see [About Ghostty](https://ghostty.org/docs/about).
+
+## Gizmo: agent control
+
+Build the Linux application with `zig build -Doptimize=ReleaseFast`.
+See [HACKING.md](HACKING.md) for build dependencies.
+
+Agent control is disabled by default. To enable it, start a dedicated instance:
+
+```sh
+export GIZMO_AGENT_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+./zig-out/bin/ghostty --class=org.gizmo.Terminal --gtk-single-instance=true
+```
+
+In a shell with the same token and session bus, inspect the API:
+
+```sh
+./zig-out/bin/ghostty +agent-control --class=org.gizmo.Terminal \
+  --request='{"method":"discover"}'
+./zig-out/bin/ghostty +agent-control --class=org.gizmo.Terminal \
+  --request='{"method":"tree"}'
+```
+
+`discover` lists methods, action parameters, keys, configuration keys, and GTK
+actions. `tree` returns stable window, tab, and terminal surface IDs.
+Unrealized terminal leaves expose `ready: false` and a widget ID.
+Select their tab before sending terminal input.
+
+The interface supports:
+
+- Terminal text, scrollback, grid size, and cursor inspection.
+- Rendered window images through `screen.capture`.
+- Native widget inspection and interaction through `ui.tree` and `ui.action`.
+- Existing terminal actions, text input, key events, pointer input, scrolling,
+  and GTK actions.
+- Live configuration through `config.get`, `config.set`, `config.reset`, and
+  `config.reload`.
+- Custom panels and tool workflows through `extensions.*`.
+
+Use a surface ID from `tree` when sending terminal actions:
+
+```json
+{"method":"action","params":{"surface":"123","action":"new_split:right"}}
+```
+
+Configuration changes remain session-local unless `persist_path` explicitly
+names an absolute file:
+
+```json
+{"method":"config.set","params":{"text":"font-size = 16\ngtk-tabs-orientation = vertical"}}
+```
+
+Persistence atomically replaces the named file with the full canonical
+configuration. `config.reload` reloads configuration files and launch arguments.
+Settings retain their existing runtime or new-terminal semantics.
+
+### Custom panels and workflows
+
+`extensions.discover` returns the definition format and working examples.
+Panels support labels, entries, buttons, toggles, and selections.
+Agents can inspect state, change values, replace definitions, or apply JSON
+Merge Patch.
+
+This request installs a native panel without executing its tool:
+
+```json
+{
+  "method": "extensions.install",
+  "params": {
+    "definition": {
+      "id": "hello",
+      "title": "Gizmo tools",
+      "elements": [
+        {"id": "name", "type": "entry", "label": "Name", "text": "Gizmo"},
+        {
+          "id": "run",
+          "type": "button",
+          "label": "Run",
+          "action": {
+            "type": "workflow",
+            "argv": ["/usr/bin/printf", "Hello %s\n", {"element": "name"}]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Invoke the button explicitly:
+
+```json
+{"method":"extensions.invoke","params":{"id":"hello","element":"run"}}
+```
+
+Inspect the returned job ID with `extensions.inspect`.
+Jobs expose output, exit status, cancellation, and timeout results.
+Arguments remain separate; element values do not undergo shell interpolation.
+Jobs have bounded output and execution time.
+Cancellation kills the tool's process group. Descendants that create another
+session or process group are not tracked.
+
+Extensions remain session-local. Save definitions externally to reinstall them.
+Closing a panel hides it. Removing it cancels its jobs.
+
+### Security and protocol
+
+Treat the token as shell access. Grant it only to trusted agents.
+This interface is not a sandbox. Child processes inherit the application
+environment.
+
+The endpoint uses the session bus, not TCP:
+
+- Interface: `org.gizmo.Agent1`
+- Object: `/org/gizmo/Agent1`
+- Method: `Request(s JSON) -> (s JSON)`
+- Request: `{"token":"secret","method":"tree","params":{}}`
+- Success: `{"ok":true,"result":...}`
+- Failure: D-Bus error `org.gizmo.Agent1.Error`
+
+The CLI adds the environment token automatically. CLI failures return JSON and
+a nonzero exit status.
+Requests are limited to 1 MiB; responses are limited to 16 MiB.
+
+Screen images cover Gizmo's rendered window content, not other applications or
+compositor decorations. Terminal text does not represent embedded images.
+Unrendered windows return an explicit capture error.
+
+## Gizmo: horizontal and vertical tabs
+
+Use **Main Menu → Gizmo Tab Orientation** to switch layouts without restarting
+terminal sessions.
+
+For a persistent default, add this configuration:
+
+```ini
+gtk-tabs-orientation = vertical
+```
+
+The default is `horizontal`. Horizontal tabs retain their top or bottom placement.
+Vertical tabs use a left sidebar with selection, close, rename, reorder, and
+new-window controls.
+
+The GTK actions `win.set-tabs-orientation` and `win.toggle-tabs-orientation`
+change one window for the current session:
+
+```json
+{"method":"gtk.action","params":{"surface":"123","name":"win.set-tabs-orientation","parameter":"'vertical'"}}
+```
+
+`gtk.actions` exposes each window's orientation action and state.
+Explicit configuration updates reset session overrides. Soft theme changes
+preserve them.
+
+These Gizmo features currently target Linux GTK only.
 
 ## Download
 
